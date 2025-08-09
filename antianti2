@@ -457,7 +457,7 @@ td a.file::before   { content: "📄"; margin-right: 8px; font-size: 1.15rem; cu
 <th>Size</th>
 <th>Owner</th>
 <th>Group</th>
-<th>Perm</th>
+<th>Permissions</th>
 <th>Created</th>
 <th>Actions</th>
 </tr>
