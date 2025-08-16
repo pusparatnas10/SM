@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>404 - SILAKAN DI PAKEK ABANG YANG PALING JAGO</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Segoe UI', sans-serif;
+      background: linear-gradient(to bottom, #001f2e, #004c4c);
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      text-align: center;
+      overflow: hidden;
+    }
+
+    .container {
+      max-width: 500px;
+    }
+
+    .container img {
+      max-width: 100%;
+      height: auto;
+      margin-bottom: 20px;
+      animation: float 3s ease-in-out infinite;
+    }
+
+    h1 {
+      font-size: 2.5rem;
+      margin: 0;
+      color: #00ffd0;
+      text-shadow: 0 0 10px #00ffd0;
+    }
+
+    p {
+      font-size: 1.1rem;
+      margin-top: 10px;
+      margin-bottom: 30px;
+    }
+
+    a {
+      padding: 12px 24px;
+      background-color: #00bfa5;
+      color: #000;
+      text-decoration: none;
+      border-radius: 5px;
+      font-weight: bold;
+      box-shadow: 0 0 10px #00ffc3;
+      transition: background 0.3s;
+    }
+
+    a:hover {
+      background-color: #00ffcc;
+    }
+
+    @keyframes float {
+      0% { transform: translateY(0px); }
+      50% { transform: translateY(-10px); }
+      100% { transform: translateY(0px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <img src="https://imgme.pro/images/404.png" alt="404 Ultramen Maskot">
+    <h1>Oops! Halaman Tidak Ditemukan</h1>
+    <p>Ultramen tidak menemukan halaman yang kamu cari.<br>Coba kembali ke halaman utama ya!</p>
+    <a href="/">Kembali ke Beranda</a>
+  </div>
+</body>
+</html>
